@@ -50,3 +50,23 @@ For the purposes of easy reviewing, the implementation shall be split into follo
 - Main entry point, wires all pipeline stages
 - Error handlers: Whisper crash (display + manual restart), audio device disconnect (retry)
 - Graceful shutdown
+
+## Step 1 Notes
+
+The project structure should be as follows:
+
+```
+wedding-transcriptor/
+├── src/
+│   └── transcriptor/
+│       ├── __init__.py
+│       ├── config.py          # Pydantic-settings models
+│       ├── logging_setup.py   # Logging configuration
+│       ├── audio.py           # Audio capture (Step 2)
+│       ├── vad.py             # VAD (Step 3)
+│       ├── transcription.py   # Whisper (Step 4)
+│       ├── stabilization.py   # Stabilization (Step 5)
+│       ├── storage.py         # SQLite queue (Step 6)
+│       ├── server.py          # WebSocket/HTTP (Step 7)
+│       ├── ui.py              # tkinter UI (Step 8)
+```

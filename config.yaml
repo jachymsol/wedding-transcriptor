@@ -1,0 +1,15 @@
+event_id: wedding-2027
+
+server:
+  websocket_url: wss://translate.example.com/ws
+
+audio:
+  device_id: default
+
+transcription:
+  model: medium
+  language: en
+
+stabilization:
+  silence_ms: 700
+  stable_ms: 2000

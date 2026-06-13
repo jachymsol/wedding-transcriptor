@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Runtime data
+data/*.db
+logs/*.log
+logs/*.log.*
+
+# Config overrides (keep the template, not personal copies)
+config.local.yaml
+
+# Whisper model cache
+~/.cache/huggingface/
