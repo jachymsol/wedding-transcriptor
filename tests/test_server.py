@@ -259,22 +259,25 @@ class TestQueueDrain:
 
         ws = _FakeWs()
         connected = threading.Event()
-        drained = threading.Event()
 
         def ws_factory(url):
+            # Signal that the factory was called, then return ws immediately.
+            # Blocking here before returning ws would prevent _drain_queue()
+            # from running, creating a circular dependency with any "wait for
+            # drain" logic in the test.
             connected.set()
-            drained.wait(timeout=2.0)
-            ws.disconnect()
             return ws
 
         client = ServerClient(_make_config(), tmp_queue, ws_factory=ws_factory, retry_interval_s=0.05)
         client.start()
-        connected.wait(timeout=2.0)
-        # Give drain time to run
+        assert connected.wait(timeout=2.0), "ws_factory was never called"
+
+        # Wait for _drain_queue() to empty the queue (runs in the server thread
+        # immediately after the factory returns and state is set to CONNECTED_WS).
         deadline = time.monotonic() + 2.0
         while tmp_queue.count() > 0 and time.monotonic() < deadline:
-            time.sleep(0.02)
-        drained.set()
+            time.sleep(0.01)
+
         client.stop()
 
         assert len(ws.sent) == 3
