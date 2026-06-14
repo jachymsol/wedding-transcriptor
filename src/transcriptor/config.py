@@ -15,7 +15,8 @@ from pydantic_settings import (
 
 # Resolve config.yaml relative to the project root (two levels above this file).
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
-_CONFIG_FILE = _PROJECT_ROOT / "config.yaml"
+CONFIG_FILE: Path = _PROJECT_ROOT / "config.yaml"   # public — used by startup dialog
+_CONFIG_FILE = CONFIG_FILE                            # keep old name for internal use
 
 
 class ServerConfig(BaseModel):

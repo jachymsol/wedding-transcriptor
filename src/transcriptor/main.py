@@ -43,7 +43,7 @@ from typing import Optional
 import numpy as np
 
 from transcriptor.audio import AudioCapture
-from transcriptor.config import load_config
+from transcriptor.config import AppConfig, load_config
 from transcriptor.logging_setup import setup_logging
 from transcriptor.server import ServerClient
 from transcriptor.stabilization import Stabilizer, TranscriptSegment
@@ -65,13 +65,18 @@ class Application:
 
     Parameters
     ----------
+    config:
+        Pre-built :class:`~transcriptor.config.AppConfig`.  When ``None``
+        (the default) the config is loaded from ``config.yaml`` via
+        :func:`~transcriptor.config.load_config`.  Pass an explicit config
+        when the startup dialog has applied operator overrides.
     ui_factory:
         Optional callable ``() → AppUI`` for dependency injection in tests.
         Defaults to the real :class:`~transcriptor.ui.AppUI`.
     """
 
-    def __init__(self, *, ui_factory=None) -> None:
-        self._config = load_config()
+    def __init__(self, *, config: Optional[AppConfig] = None, ui_factory=None) -> None:
+        self._config = config if config is not None else load_config()
         log.info("Starting Wedding Transcriptor — event_id=%s", self._config.event_id)
 
         # Storage (persistent offline queue)
@@ -299,8 +304,16 @@ class Application:
 
 def main() -> None:
     setup_logging()
-    app = Application()
-    app.run()
+
+    from transcriptor.startup import StartupDialog  # deferred: avoids tkinter at import time
+
+    dialog = StartupDialog(load_config())
+    config = dialog.run()          # blocks until Start or Cancel
+    if config is None:
+        log.info("Startup cancelled by operator — exiting")
+        return
+
+    Application(config=config).run()
 
 
 if __name__ == "__main__":
