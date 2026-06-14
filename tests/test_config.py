@@ -12,6 +12,7 @@ from transcriptor.config import (
     ServerConfig,
     StabilizationConfig,
     TranscriptionConfig,
+    VADConfig,
     load_config,
 )
 
@@ -38,6 +39,12 @@ class TestDefaults:
 
     def test_stabilization_stable_ms(self):
         assert StabilizationConfig().stable_ms == 2000
+
+    def test_vad_max_speech_ms(self):
+        assert VADConfig().max_speech_ms == 10_000
+
+    def test_vad_overlap_ms(self):
+        assert VADConfig().overlap_ms == 3_000
 
     def test_app_event_id(self):
         # Default when no YAML or env override is present
@@ -75,6 +82,7 @@ class TestYamlLoading:
             "audio": {"device_id": "usb-mixer"},
             "transcription": {"model": "small", "language": "cs"},
             "stabilization": {"silence_ms": 500, "stable_ms": 1500},
+            "vad": {"max_speech_ms": 5000, "overlap_ms": 2000},
         }
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml.dump(payload))
@@ -93,6 +101,8 @@ class TestYamlLoading:
         assert cfg.transcription.language == "cs"
         assert cfg.stabilization.silence_ms == 500
         assert cfg.stabilization.stable_ms == 1500
+        assert cfg.vad.max_speech_ms == 5000
+        assert cfg.vad.overlap_ms == 2000
 
     def test_missing_yaml_file_falls_back_to_defaults(self, tmp_path):
         """If the YAML file does not exist, all defaults still apply."""
@@ -134,6 +144,7 @@ class TestLoadConfig:
         assert isinstance(cfg.audio, AudioConfig)
         assert isinstance(cfg.transcription, TranscriptionConfig)
         assert isinstance(cfg.stabilization, StabilizationConfig)
+        assert isinstance(cfg.vad, VADConfig)
 
     def test_project_config_yaml_values(self):
         """The values in the committed config.yaml match the spec defaults."""
@@ -145,3 +156,5 @@ class TestLoadConfig:
         assert cfg.transcription.language == "en"
         assert cfg.stabilization.silence_ms == 700
         assert cfg.stabilization.stable_ms == 2000
+        assert cfg.vad.max_speech_ms == 10_000
+        assert cfg.vad.overlap_ms == 3_000

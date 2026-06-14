@@ -13,3 +13,7 @@ transcription:
 stabilization:
   silence_ms: 700
   stable_ms: 2000
+
+vad:
+  max_speech_ms: 10000
+  overlap_ms: 3000

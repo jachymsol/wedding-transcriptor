@@ -48,7 +48,7 @@ from transcriptor.logging_setup import setup_logging
 from transcriptor.server import ServerClient
 from transcriptor.stabilization import Stabilizer, TranscriptSegment
 from transcriptor.storage import SegmentQueue
-from transcriptor.transcription import Transcriber
+from transcriptor.transcription import Transcriber, TranscriptResult
 from transcriptor.ui import AppUI
 from transcriptor.vad import VoiceActivityDetector
 
@@ -81,7 +81,12 @@ class Application:
         self._audio = AudioCapture(self._config.audio)
 
         # VAD (loads Silero on construction)
-        self._vad = VoiceActivityDetector()
+        self._vad = VoiceActivityDetector(
+            max_speech_ms=self._config.vad.max_speech_ms,
+            overlap_ms=self._config.vad.overlap_ms,
+        )
+        # Pre-compute overlap in seconds for partial-commit boundary calculation.
+        self._overlap_s: float = self._config.vad.overlap_ms / 1000.0
 
         # Transcriber (loads Whisper on construction)
         self._transcriber: Transcriber = Transcriber(self._config.transcription)
@@ -173,6 +178,29 @@ class Application:
         log.info("Transcriber restart complete")
 
     # ------------------------------------------------------------------
+    # Partial-commit helper
+    # ------------------------------------------------------------------
+
+    def _extract_committed_text(self, result: TranscriptResult) -> str:
+        """Return the portion of *result* that lies before the overlap region.
+
+        For a partial segment (``is_final=False``) the last ``overlap_ms`` of
+        audio is kept in the VAD buffer for the next window.  We must not send
+        words that fall inside that overlap — they will be re-transcribed with
+        better context next time.
+
+        Returns an empty string when no words fall before the commit boundary
+        (e.g. the speaker started right at the end of the window).
+        """
+        commit_boundary_s = result.duration_s - self._overlap_s
+        if commit_boundary_s <= 0 or not result.words:
+            return ""
+        committed = [w for w in result.words if w.end <= commit_boundary_s]
+        if not committed:
+            return ""
+        return " ".join(w.word.strip() for w in committed).strip()
+
+    # ------------------------------------------------------------------
     # Pipeline loop (runs on the pipeline thread)
     # ------------------------------------------------------------------
 
@@ -221,10 +249,26 @@ class Application:
             if not result.text:
                 continue
 
-            # ── Stabilization ─────────────────────────────────────────
-            final_seg: Optional[TranscriptSegment] = self._stabilizer.update(
-                result, is_final=True
-            )
+            # ── Stabilization & send ──────────────────────────────────
+            if speech_seg.is_final:
+                # Normal path: VAD detected silence → finalize immediately.
+                final_seg: Optional[TranscriptSegment] = self._stabilizer.update(
+                    result, is_final=True
+                )
+            else:
+                # Partial path: max_speech_ms triggered a mid-speech emit.
+                # Commit only the words before the overlap region; words
+                # inside the overlap will be re-transcribed next window.
+                committed_text = self._extract_committed_text(result)
+                if not committed_text:
+                    log.debug("Partial segment: no words before commit boundary; skipping")
+                    continue
+                committed_result = TranscriptResult(
+                    text=committed_text,
+                    language=result.language,
+                    duration_s=result.duration_s - self._overlap_s,
+                )
+                final_seg = self._stabilizer.update(committed_result, is_final=True)
 
             if final_seg is not None:
                 log.info(

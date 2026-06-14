@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from transcriptor.vad import SpeechSegment, VoiceActivityDetector, _VAD_WINDOW, _ms_to_windows
+from transcriptor.vad import SpeechSegment, VoiceActivityDetector, _VAD_WINDOW, _ms_to_windows, _SAMPLE_RATE
 
 from .conftest import CHUNK_SAMPLES, make_vad
 
@@ -191,6 +191,14 @@ class TestSegmentEmission:
         seg = _feed_silence(vad, model)
         assert len(seg.audio) > 0
 
+    def test_silence_triggered_segment_is_final(self):
+        """Segments closed by silence detection must have is_final=True."""
+        vad, model = make_vad()
+        _feed_speech(vad, model, n_chunks=3)
+        seg = _feed_silence(vad, model)
+        assert seg is not None
+        assert seg.is_final is True
+
     def test_state_returns_to_silence_after_emission(self):
         vad, model = make_vad()
         _feed_speech(vad, model, n_chunks=3)
@@ -237,6 +245,14 @@ class TestFlush:
         assert seg is not None
         assert isinstance(seg, SpeechSegment)
         assert vad.state == "SILENCE"
+
+    def test_flush_segment_is_final(self):
+        """flush() always produces a final segment (speech ended)."""
+        vad, model = make_vad()
+        _feed_speech(vad, model, n_chunks=3)
+        seg = vad.flush()
+        assert seg is not None
+        assert seg.is_final is True
 
     def test_flush_in_silence_returns_none(self):
         vad, _ = make_vad()
@@ -364,4 +380,159 @@ class TestKnownLimitations:
 
         # Only the LAST emitted segment is returned (the first is silently dropped)
         assert isinstance(seg, SpeechSegment)
+        assert vad.state == "SILENCE"
+
+
+# ---------------------------------------------------------------------------
+# max_speech_ms — partial-emit behaviour
+# ---------------------------------------------------------------------------
+
+# Convenient window count for tests: 4 windows = 4 × 512 = 2048 samples ≈ 128 ms
+_FOUR_WINDOWS = np.zeros(4 * _VAD_WINDOW, dtype=np.float32)
+
+
+def _make_vad_with_max(max_speech_ms: int, overlap_ms: int = 0) -> tuple:
+    """VAD with tiny max_speech_ms so tests don't need thousands of chunks."""
+    model = make_vad(max_speech_ms=max_speech_ms, overlap_ms=overlap_ms)[1]
+    vad = VoiceActivityDetector(
+        speech_start_ms=32,    # 1 window to enter SPEECH
+        speech_end_ms=32,      # 1 window to leave SPEECH
+        pre_roll_ms=0,
+        max_speech_ms=max_speech_ms,
+        overlap_ms=overlap_ms,
+        model=model,
+    )
+    return vad, model
+
+
+class TestMaxSpeechMs:
+    def test_partial_emitted_when_buffer_exceeds_max(self):
+        """When accumulated speech reaches max_speech_ms, a partial is emitted."""
+        # max_speech_ms equivalent to 4 windows
+        max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE  # ≈ 128 ms
+        vad, model = _make_vad_with_max(max_ms, overlap_ms=0)
+
+        # Enter SPEECH
+        model.return_value.item.return_value = 1.0
+        vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))  # 1 window → SPEECH
+
+        # Feed windows one at a time; partial fires when buffer hits max
+        seg = None
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                seg = result
+                break
+
+        assert seg is not None
+        assert isinstance(seg, SpeechSegment)
+
+    def test_partial_segment_is_not_final(self):
+        """Partial segments emitted by max_speech_ms have is_final=False."""
+        max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE
+        vad, model = _make_vad_with_max(max_ms, overlap_ms=0)
+
+        model.return_value.item.return_value = 1.0
+        vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+
+        seg = None
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                seg = result
+                break
+
+        assert seg is not None
+        assert seg.is_final is False
+
+    def test_state_stays_speech_after_partial(self):
+        """After a partial emit, VAD remains in SPEECH state."""
+        max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE
+        vad, model = _make_vad_with_max(max_ms, overlap_ms=0)
+
+        model.return_value.item.return_value = 1.0
+        vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                break
+
+        assert vad.state == "SPEECH"
+
+    def test_model_reset_not_called_after_partial(self):
+        """GRU state must NOT be reset after a partial emit (speech is ongoing)."""
+        max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE
+        vad, model = _make_vad_with_max(max_ms, overlap_ms=0)
+
+        model.return_value.item.return_value = 1.0
+        vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                break
+
+        model.reset_states.assert_not_called()
+
+    def test_overlap_windows_kept_in_buffer_after_partial(self):
+        """After a partial emit, the buffer retains exactly overlap_windows entries."""
+        # 2 overlap windows
+        overlap_ms = 2 * _VAD_WINDOW * 1000 // _SAMPLE_RATE  # ≈ 64 ms
+        max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE      # ≈ 128 ms
+        vad, model = _make_vad_with_max(max_ms, overlap_ms=overlap_ms)
+
+        model.return_value.item.return_value = 1.0
+        vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))  # enter SPEECH
+
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                break
+
+        assert len(vad._speech_buf) == 2  # exactly overlap_windows
+
+    def test_no_partial_when_max_speech_ms_zero(self):
+        """max_speech_ms=0 disables partial emission entirely."""
+        vad, model = _make_vad_with_max(max_speech_ms=0, overlap_ms=0)
+
+        model.return_value.item.return_value = 1.0
+        # Feed many windows — no partial should fire
+        seg = None
+        for _ in range(50):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                seg = result
+                break
+
+        assert seg is None
+        assert vad.state == "SPEECH"
+
+    def test_silence_after_partial_emits_final_segment(self):
+        """After a partial emit, sustained silence closes the remaining audio as final."""
+        max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE
+        vad, model = _make_vad_with_max(max_ms, overlap_ms=0)
+
+        # Enter SPEECH and trigger a partial
+        model.return_value.item.return_value = 1.0
+        vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+        partial = None
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                partial = result
+                break
+        assert partial is not None and partial.is_final is False
+
+        # Now silence → should emit the remaining speech as final
+        model.return_value.item.return_value = 0.0
+        final = None
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                final = result
+                break
+
+        assert final is not None
+        assert final.is_final is True
         assert vad.state == "SILENCE"

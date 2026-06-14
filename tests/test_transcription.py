@@ -17,16 +17,26 @@ import pytest
 from unittest.mock import MagicMock, call, patch
 
 from transcriptor.config import TranscriptionConfig
-from transcriptor.transcription import Transcriber, TranscriptResult, _SAMPLE_RATE
+from transcriptor.transcription import Transcriber, TranscriptResult, Word, _SAMPLE_RATE
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_segment(text: str) -> MagicMock:
+def _make_word(word: str, start: float, end: float) -> MagicMock:
+    """Return a mock faster-whisper Word."""
+    w = MagicMock()
+    w.word = word
+    w.start = start
+    w.end = end
+    return w
+
+
+def _make_segment(text: str, words=None) -> MagicMock:
     seg = MagicMock()
     seg.text = text
+    seg.words = words if words is not None else []
     return seg
 
 
@@ -57,6 +67,23 @@ AUDIO_3S = np.zeros(48_000, dtype=np.float32)   # 3 s of silence
 
 
 # ---------------------------------------------------------------------------
+# Word dataclass
+# ---------------------------------------------------------------------------
+
+class TestWord:
+    def test_fields_are_accessible(self):
+        w = Word(word="hello", start=0.0, end=0.5)
+        assert w.word == "hello"
+        assert w.start == 0.0
+        assert w.end == 0.5
+
+    def test_fields_accept_float_timestamps(self):
+        w = Word(word="world", start=1.23, end=2.45)
+        assert w.start == pytest.approx(1.23)
+        assert w.end == pytest.approx(2.45)
+
+
+# ---------------------------------------------------------------------------
 # TranscriptResult dataclass
 # ---------------------------------------------------------------------------
 
@@ -66,6 +93,15 @@ class TestTranscriptResult:
         assert r.text == "hello"
         assert r.language == "en"
         assert r.duration_s == 1.5
+
+    def test_words_defaults_to_empty_list(self):
+        r = TranscriptResult(text="hello", language="en", duration_s=1.5)
+        assert r.words == []
+
+    def test_words_field_accepted(self):
+        words = [Word("hello", 0.0, 0.4), Word("world", 0.5, 0.9)]
+        r = TranscriptResult(text="hello world", language="en", duration_s=1.0, words=words)
+        assert len(r.words) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +197,13 @@ class TestTranscribeModelCall:
         _, kwargs = model.transcribe.call_args
         assert kwargs["vad_filter"] is False
 
+    def test_word_timestamps_enabled(self):
+        """word_timestamps=True must be passed so we can do partial commits."""
+        t, model = _make_transcriber(["hi"])
+        t.transcribe(AUDIO_1S)
+        _, kwargs = model.transcribe.call_args
+        assert kwargs["word_timestamps"] is True
+
     def test_audio_array_passed_to_model(self):
         t, model = _make_transcriber(["hi"])
         t.transcribe(AUDIO_1S)
@@ -241,3 +284,65 @@ class TestLoadWhisperModel:
 
         # First call (cuda) failed; second call (cpu) succeeded
         assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Word collection — words extracted from segment.words
+# ---------------------------------------------------------------------------
+
+class TestWordCollection:
+    def _make_model_with_words(self, text: str, words: list) -> MagicMock:
+        seg = _make_segment(text, words=words)
+        info = MagicMock()
+        model = MagicMock()
+        model.transcribe.return_value = (iter([seg]), info)
+        return model
+
+    def test_words_collected_from_segment(self):
+        mock_words = [_make_word(" hello", 0.0, 0.4), _make_word(" world", 0.5, 0.9)]
+        model = self._make_model_with_words("hello world", mock_words)
+        config = TranscriptionConfig(model="medium", language="en")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert len(result.words) == 2
+
+    def test_word_fields_preserved(self):
+        mock_words = [_make_word(" hello", 0.1, 0.4)]
+        model = self._make_model_with_words("hello", mock_words)
+        config = TranscriptionConfig(model="medium", language="en")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        w = result.words[0]
+        assert w.word == " hello"
+        assert w.start == pytest.approx(0.1)
+        assert w.end == pytest.approx(0.4)
+
+    def test_words_collected_across_multiple_segments(self):
+        w1 = _make_word(" hello", 0.0, 0.4)
+        w2 = _make_word(" world", 0.5, 0.9)
+        seg1 = _make_segment("hello", words=[w1])
+        seg2 = _make_segment("world", words=[w2])
+        info = MagicMock()
+        model = MagicMock()
+        model.transcribe.return_value = (iter([seg1, seg2]), info)
+        config = TranscriptionConfig(model="medium", language="en")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert len(result.words) == 2
+        assert result.words[0].word == " hello"
+        assert result.words[1].word == " world"
+
+    def test_empty_words_when_segment_has_no_words(self):
+        seg = _make_segment("hello", words=[])
+        info = MagicMock()
+        model = MagicMock()
+        model.transcribe.return_value = (iter([seg]), info)
+        config = TranscriptionConfig(model="medium", language="en")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert result.words == []
+
+    def test_words_empty_when_no_segments(self):
+        t, _ = _make_transcriber([])
+        result = t.transcribe(AUDIO_1S)
+        assert result.words == []

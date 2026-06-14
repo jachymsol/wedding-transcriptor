@@ -36,12 +36,23 @@ class StabilizationConfig(BaseModel):
     stable_ms: int = 2000
 
 
+class VADConfig(BaseModel):
+    #: Emit a partial segment and reset the buffer when speech exceeds this
+    #: duration (milliseconds).  Set to 0 to disable — VAD will accumulate
+    #: indefinitely until silence is detected.
+    max_speech_ms: int = 10_000   # 10 s
+    #: Audio kept at the end of each partial buffer to give Whisper context
+    #: at the start of the next window (milliseconds).
+    overlap_ms: int = 3_000       # 3 s
+
+
 class AppConfig(BaseSettings):
     event_id: str = "wedding-2027"
     server: ServerConfig = ServerConfig()
     audio: AudioConfig = AudioConfig()
     transcription: TranscriptionConfig = TranscriptionConfig()
     stabilization: StabilizationConfig = StabilizationConfig()
+    vad: VADConfig = VADConfig()
 
     model_config = SettingsConfigDict(yaml_file=str(_CONFIG_FILE))
 

@@ -10,7 +10,7 @@ Model weights are downloaded from Hugging Face on first use and cached in
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -26,6 +26,21 @@ _CPU_MODEL: str = "small"        # spec §4 fallback
 
 
 @dataclass
+class Word:
+    """A single word with timing, returned when ``word_timestamps=True``.
+
+    Attributes:
+        word:  The recognised word (may include leading/trailing spaces).
+        start: Start time in seconds, relative to the start of the audio clip.
+        end:   End time in seconds, relative to the start of the audio clip.
+    """
+
+    word: str
+    start: float
+    end: float
+
+
+@dataclass
 class TranscriptResult:
     """Output of a single transcription pass.
 
@@ -33,11 +48,14 @@ class TranscriptResult:
         text:       Joined, stripped transcript text.
         language:   Language code used (e.g. ``"en"``, ``"cs"``).
         duration_s: Duration of the source audio in seconds.
+        words:      Per-word timing list (populated when ``word_timestamps``
+                    is available; empty list otherwise).
     """
 
     text: str
     language: str
     duration_s: float
+    words: list = field(default_factory=list)  # list[Word]
 
 
 def _load_whisper_model(model_name: str) -> Any:
@@ -126,25 +144,36 @@ class Transcriber:
         duration_s = len(audio) / _SAMPLE_RATE
 
         # vad_filter=False: our pipeline already runs Silero VAD externally.
+        # word_timestamps=True: needed for partial-commit boundary detection
+        # when max_speech_ms forces a mid-speech segment split.
         segments_iter, _info = self._model.transcribe(
             audio,
             language=self._language,
             beam_size=5,
             vad_filter=False,
+            word_timestamps=True,
         )
 
         # Materialise the lazy iterator — faster-whisper yields segments on demand.
-        text = " ".join(
-            seg.text.strip() for seg in segments_iter if seg.text.strip()
-        )
+        all_words: list[Word] = []
+        texts: list[str] = []
+        for seg in segments_iter:
+            if seg.text.strip():
+                texts.append(seg.text.strip())
+            for w in (seg.words or []):
+                all_words.append(Word(word=w.word, start=w.start, end=w.end))
+
+        text = " ".join(texts)
 
         result = TranscriptResult(
             text=text,
             language=self._language,
             duration_s=duration_s,
+            words=all_words,
         )
         log.info(
-            "Transcribed %.1f s [%s]: %r", duration_s, self._language, text
+            "Transcribed %.1f s [%s]: %r (%d words)",
+            duration_s, self._language, text, len(all_words),
         )
         return result
 

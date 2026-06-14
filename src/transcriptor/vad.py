@@ -40,12 +40,19 @@ class _State(Enum):
 
 @dataclass
 class SpeechSegment:
-    """A complete speech utterance ready for transcription.
+    """A speech utterance ready for transcription.
 
     Attributes:
-        audio: float32 mono array at 16 kHz, concatenated from VAD windows.
+        audio:    float32 mono array at 16 kHz, concatenated from VAD windows.
+        is_final: ``True`` when the segment was closed by silence detection
+                  (normal end-of-utterance).  ``False`` when the segment was
+                  force-emitted because the buffer hit ``max_speech_ms`` —
+                  speech is still ongoing and the caller should extract only
+                  the committed portion (before the overlap region) rather
+                  than the full audio.
     """
     audio: np.ndarray
+    is_final: bool = True
 
 
 class VoiceActivityDetector:
@@ -57,7 +64,13 @@ class VoiceActivityDetector:
     State machine::
 
         SILENCE ──(speech_start_ms of speech)──► SPEECH
-        SPEECH  ──(speech_end_ms of silence)───► SILENCE  → emit segment
+        SPEECH  ──(speech_end_ms of silence)───► SILENCE  → emit segment (is_final=True)
+        SPEECH  ──(max_speech_ms accumulated)──► SPEECH   → emit partial  (is_final=False)
+
+    When ``max_speech_ms > 0`` and the speech buffer reaches that limit, the
+    full buffer is emitted as a *partial* segment (``is_final=False``).  The
+    last ``overlap_ms`` of audio is kept in the buffer so the next Whisper
+    call has context.  Speech detection continues without interruption.
 
     Usage::
 
@@ -81,6 +94,8 @@ class VoiceActivityDetector:
         speech_start_ms: int = _SPEECH_START_MS,
         speech_end_ms: int = _SPEECH_END_MS,
         pre_roll_ms: int = _PRE_ROLL_MS,
+        max_speech_ms: int = 10_000,
+        overlap_ms: int = 3_000,
         model=None,
     ) -> None:
         if model is None:
@@ -94,6 +109,16 @@ class VoiceActivityDetector:
         self._threshold = threshold
         self._start_wins = _ms_to_windows(speech_start_ms)
         self._end_wins = _ms_to_windows(speech_end_ms)
+
+        # max_speech_ms=0 disables partial emission.
+        self._max_speech_samples: int = (
+            max_speech_ms * _SAMPLE_RATE // 1000 if max_speech_ms > 0 else 0
+        )
+        # Overlap is stored as a window count so the tail of _speech_buf
+        # can be sliced directly (all windows are _VAD_WINDOW samples wide).
+        self._overlap_windows: int = max(
+            0, overlap_ms * _SAMPLE_RATE // 1000 // _VAD_WINDOW
+        )
 
         # Pre-roll ring buffer: recent silence windows prepended to each segment
         # so word onsets aren't clipped.
@@ -186,6 +211,14 @@ class VoiceActivityDetector:
 
         else:  # SPEECH
             self._speech_buf.append(window)
+
+            # Partial emit when the buffer hits max_speech_ms.
+            if (
+                self._max_speech_samples > 0
+                and len(self._speech_buf) * _VAD_WINDOW >= self._max_speech_samples
+            ):
+                return self._emit_partial()
+
             if not is_speech:
                 self._consec_silence += 1
                 self._consec_speech = 0
@@ -222,7 +255,40 @@ class VoiceActivityDetector:
         self._consec_silence = 0
         self._pre_roll.clear()
         self._model.reset_states()  # clear GRU state for next utterance
-        return SpeechSegment(audio=audio)
+        return SpeechSegment(audio=audio, is_final=True)
+
+    def _emit_partial(self) -> SpeechSegment:
+        """Emit a partial segment mid-speech and reset the buffer with overlap.
+
+        Called when the accumulated speech buffer reaches ``max_speech_ms``.
+        State stays ``SPEECH`` — audio capture and VAD continue uninterrupted.
+        The last ``overlap_windows`` windows are kept so the next Whisper call
+        has enough context to avoid boundary artefacts.
+
+        The Silero GRU state is *not* reset because the speaker has not paused.
+        """
+        audio = (
+            np.concatenate(self._speech_buf)
+            if self._speech_buf
+            else np.empty(0, dtype=np.float32)
+        )
+        duration_s = len(audio) / _SAMPLE_RATE
+        log.debug(
+            "Partial speech segment: %.2f s (max_speech_ms reached; "
+            "keeping %d overlap windows)",
+            duration_s,
+            self._overlap_windows,
+        )
+        # Preserve the overlap tail — the rest is committed.
+        self._speech_buf = (
+            self._speech_buf[-self._overlap_windows:]
+            if self._overlap_windows > 0
+            else []
+        )
+        self._consec_speech = 0
+        self._consec_silence = 0
+        # Stay in SPEECH state; do NOT reset model GRU state.
+        return SpeechSegment(audio=audio, is_final=False)
 
 
 # ---------------------------------------------------------------------------
