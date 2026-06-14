@@ -76,6 +76,19 @@ class TranscriptSegment:
         """Serialize to a compact JSON string (non-ASCII characters preserved)."""
         return json.dumps(self.to_dict(), ensure_ascii=False)
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "TranscriptSegment":
+        """Reconstruct a TranscriptSegment from a plain dict (e.g. from JSON storage)."""
+        return cls(
+            event_id=data["event_id"],
+            segment_id=data["segment_id"],
+            sequence_number=data["sequence_number"],
+            timestamp=data["timestamp"],
+            source_language=data["source_language"],
+            text=data["text"],
+            final=data.get("final", True),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Stabilizer
