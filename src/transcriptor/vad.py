@@ -81,12 +81,15 @@ class VoiceActivityDetector:
         speech_start_ms: int = _SPEECH_START_MS,
         speech_end_ms: int = _SPEECH_END_MS,
         pre_roll_ms: int = _PRE_ROLL_MS,
+        model=None,
     ) -> None:
-        log.info("Loading Silero VAD model …")
-        from silero_vad import load_silero_vad  # deferred: heavy import
-        self._model = load_silero_vad()
-        self._model.eval()
-        log.info("Silero VAD model ready")
+        if model is None:
+            log.info("Loading Silero VAD model …")
+            from silero_vad import load_silero_vad  # deferred: heavy import
+            model = load_silero_vad()
+            model.eval()
+            log.info("Silero VAD model ready")
+        self._model = model
 
         self._threshold = threshold
         self._start_wins = _ms_to_windows(speech_start_ms)
