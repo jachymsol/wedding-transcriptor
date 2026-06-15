@@ -11,9 +11,9 @@ transcription:
   language: en
 
 stabilization:
-  silence_ms: 700
-  stable_ms: 2000
+  silence_ms: 300
+  stable_ms: 1500
 
 vad:
-  max_speech_ms: 10000
-  overlap_ms: 3000
+  max_speech_ms: 4000
+  overlap_ms: 1500
