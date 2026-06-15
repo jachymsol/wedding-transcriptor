@@ -15,6 +15,6 @@ stabilization:
   stable_ms: 1500
 
 vad:
-  max_speech_ms: 4000
-  end_overlap_ms: 500
-  start_overlap_ms: 1000
+  max_speech_ms: 2000
+  end_overlap_ms: 300
+  start_overlap_ms: 600

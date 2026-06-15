@@ -160,6 +160,6 @@ class TestLoadConfig:
         assert cfg.transcription.language == "en"
         assert cfg.stabilization.silence_ms == 300
         assert cfg.stabilization.stable_ms == 1500
-        assert cfg.vad.max_speech_ms == 4_000
-        assert cfg.vad.end_overlap_ms == 500
-        assert cfg.vad.start_overlap_ms == 1_000
+        assert cfg.vad.max_speech_ms == 2_000
+        assert cfg.vad.end_overlap_ms == 300
+        assert cfg.vad.start_overlap_ms == 600
