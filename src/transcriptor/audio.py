@@ -26,7 +26,7 @@ CHANNELS: int = 1                  # Mono
 CHUNK_MS: int = 100                # ms per chunk
 CHUNK_SAMPLES: int = SAMPLE_RATE * CHUNK_MS // 1000  # 1 600 samples
 
-_QUEUE_MAXSIZE: int = 50           # ~5 s of audio before dropping
+_QUEUE_MAXSIZE: int = 200          # ~20 s of audio before dropping
 _RETRY_INTERVAL: float = 5.0      # seconds between reconnect attempts
 _MONITOR_POLL: float = 0.5        # seconds between liveness checks
 

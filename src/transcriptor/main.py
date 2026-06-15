@@ -3,10 +3,10 @@
 Wires the full pipeline::
 
     AudioCapture.chunks()
-        ↓  (pipeline thread)
+        ↓  (VAD thread)
     VoiceActivityDetector.process_chunk()
-        ↓  SpeechSegment when speech ends
-    Transcriber.transcribe()
+        ↓  SpeechSegment → speech_queue
+    Transcriber.transcribe()          (transcription thread)
         ↓  TranscriptResult
     Stabilizer.update(is_final=True)
         ↓  TranscriptSegment when stable / final
@@ -16,7 +16,8 @@ Wires the full pipeline::
 Threading model
 ---------------
 * **Main thread** — tkinter event loop (``AppUI.run()``).
-* **Pipeline thread** — audio → VAD → Whisper → Stabilizer → send (daemon).
+* **VAD thread** — audio chunks → RMS meter → Silero VAD → speech_queue (daemon).
+* **Transcription thread** — speech_queue → Whisper → Stabilizer → send (daemon).
 * **Server thread** — WebSocket reconnect / queue drain (inside
   :class:`~transcriptor.server.ServerClient`, daemon).
 * **Audio monitor thread** — device reconnect loop (inside
@@ -36,6 +37,7 @@ continue without restarting the whole application.
 from __future__ import annotations
 
 import logging
+import queue
 import signal
 import threading
 from typing import Optional
@@ -58,6 +60,10 @@ log = logging.getLogger(__name__)
 _RMS_SCALE: float = 10.0
 # How often (in chunks) to push UI status updates.
 _STATUS_EVERY_N_CHUNKS: int = 10  # ≈ 1 s
+# Capacity of the inter-thread speech segment queue.
+# VAD (~1 ms/window) produces far faster than Whisper (0.6–4 s/segment) consumes;
+# a small buffer lets bursts absorb without blocking audio capture.
+_SPEECH_QUEUE_SIZE: int = 10
 
 
 class Application:
@@ -124,7 +130,9 @@ class Application:
 
         # Pipeline control
         self._stop_event = threading.Event()
-        self._pipeline_thread: Optional[threading.Thread] = None
+        self._speech_queue: queue.Queue = queue.Queue(maxsize=_SPEECH_QUEUE_SIZE)
+        self._vad_thread: Optional[threading.Thread] = None
+        self._transcription_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -136,12 +144,18 @@ class Application:
         self._audio.start()
         self._server.start()
 
-        self._pipeline_thread = threading.Thread(
-            target=self._pipeline_loop,
-            name="pipeline",
+        self._vad_thread = threading.Thread(
+            target=self._vad_loop,
+            name="vad",
             daemon=True,
         )
-        self._pipeline_thread.start()
+        self._transcription_thread = threading.Thread(
+            target=self._transcription_loop,
+            name="transcription",
+            daemon=True,
+        )
+        self._vad_thread.start()
+        self._transcription_thread.start()
 
         # Handle Ctrl+C gracefully (signal fires on main thread)
         signal.signal(signal.SIGINT, self._on_sigint)
@@ -155,9 +169,11 @@ class Application:
         log.info("Shutting down …")
         self._stop_event.set()
         self._audio.stop()
+        if self._vad_thread is not None:
+            self._vad_thread.join(timeout=5.0)
+        if self._transcription_thread is not None:
+            self._transcription_thread.join(timeout=10.0)
         self._server.stop()
-        if self._pipeline_thread is not None:
-            self._pipeline_thread.join(timeout=5.0)
         self._queue.close()
         log.info("Shutdown complete")
 
@@ -264,13 +280,12 @@ class Application:
         return " ".join(w.word.strip() for w in committed).strip()
 
     # ------------------------------------------------------------------
-    # Pipeline loop (runs on the pipeline thread)
+    # VAD loop (runs on the VAD thread)
     # ------------------------------------------------------------------
 
-    def _pipeline_loop(self) -> None:
-        log.info("Pipeline thread started")
+    def _vad_loop(self) -> None:
+        log.info("VAD thread started")
         chunk_count = 0
-        transcriber_ok = True
 
         for chunk in self._audio.chunks():
             if self._stop_event.is_set():
@@ -295,10 +310,42 @@ class Application:
             if speech_seg is None:
                 continue
 
+            try:
+                self._speech_queue.put_nowait(speech_seg)
+            except queue.Full:
+                log.warning(
+                    "Speech queue full — dropping segment (transcription too slow)"
+                )
+
+        # Flush any trailing speech before signalling transcription thread
+        trailing = self._vad.flush()
+        if trailing is not None:
+            try:
+                self._speech_queue.put(trailing, timeout=2.0)
+            except queue.Full:
+                log.warning("Speech queue full during flush — trailing segment dropped")
+
+        # Poison pill: unblock transcription thread so it can exit
+        self._speech_queue.put(None)
+        log.info("VAD thread exiting")
+
+    # ------------------------------------------------------------------
+    # Transcription loop (runs on the transcription thread)
+    # ------------------------------------------------------------------
+
+    def _transcription_loop(self) -> None:
+        log.info("Transcription thread started")
+        transcriber_ok = True
+
+        while True:
+            seg = self._speech_queue.get()
+            if seg is None:
+                break  # poison pill — VAD thread has finished
+
             # ── Transcription ─────────────────────────────────────────
             try:
                 with self._transcriber_lock:
-                    result = self._transcriber.transcribe(speech_seg.audio)
+                    result = self._transcriber.transcribe(seg.audio)
                 if not transcriber_ok:
                     transcriber_ok = True
                     log.info("Transcriber recovered")
@@ -313,13 +360,15 @@ class Application:
                 continue
 
             # ── Stabilization & send ──────────────────────────────────
-            if speech_seg.is_final:
+            if seg.is_final:
                 # Normal path: VAD detected silence → finalize immediately.
                 # Strip any overlap words already committed by the previous
                 # partial (they had better decoder context at end-of-window).
                 stripped = self._strip_leading_overlap(result)
                 if stripped is None:
-                    log.debug("Final segment: all words covered by prior overlap; skipping")
+                    log.debug(
+                        "Final segment: all words covered by prior overlap; skipping"
+                    )
                     continue
                 final_seg: Optional[TranscriptSegment] = self._stabilizer.update(
                     stripped, is_final=True
@@ -354,21 +403,7 @@ class Application:
                 self._ui.update_transcript(final_seg.text)
                 self._server.send(final_seg)
 
-        # Flush any trailing speech on shutdown
-        trailing = self._vad.flush()
-        if trailing is not None and not self._stop_event.is_set():
-            try:
-                with self._transcriber_lock:
-                    result = self._transcriber.transcribe(trailing.audio)
-                stripped = self._strip_leading_overlap(result)
-                if stripped is not None and stripped.text:
-                    final_seg = self._stabilizer.update(stripped, is_final=True)
-                    if final_seg is not None:
-                        self._server.send(final_seg)
-            except Exception as exc:
-                log.error("Flush transcription error: %s", exc)
-
-        log.info("Pipeline thread exiting")
+        log.info("Transcription thread exiting")
 
 
 # ---------------------------------------------------------------------------
