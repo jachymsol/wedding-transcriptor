@@ -86,12 +86,25 @@ class Application:
         self._audio = AudioCapture(self._config.audio)
 
         # VAD (loads Silero on construction)
+        _total_overlap_ms = (
+            self._config.vad.end_overlap_ms + self._config.vad.start_overlap_ms
+        )
         self._vad = VoiceActivityDetector(
             max_speech_ms=self._config.vad.max_speech_ms,
-            overlap_ms=self._config.vad.overlap_ms,
+            overlap_ms=_total_overlap_ms,
         )
-        # Pre-compute overlap in seconds for partial-commit boundary calculation.
-        self._overlap_s: float = self._config.vad.overlap_ms / 1000.0
+        # start_overlap_ms: words at the START of the next window that were
+        # already committed by the current window.  They are skipped in the
+        # next window to avoid double-sending.
+        # end_overlap_ms: the LAST end_overlap_ms of each partial window are
+        # NOT committed from that window; instead they are committed by the
+        # *next* window, where they benefit from more right-side audio context.
+        # The total VAD buffer = start + end, but each half plays a different role.
+        self._end_overlap_s: float = self._config.vad.end_overlap_ms / 1000.0
+        self._start_overlap_s: float = self._config.vad.start_overlap_ms / 1000.0
+        # Seconds to skip at the START of the next segment (= start_overlap_s).
+        # Set after every partial emit; reset to 0.0 after each segment.
+        self._skip_overlap_s: float = 0.0
 
         # Transcriber (loads Whisper on construction)
         self._transcriber: Transcriber = Transcriber(self._config.transcription)
@@ -183,26 +196,71 @@ class Application:
         log.info("Transcriber restart complete")
 
     # ------------------------------------------------------------------
-    # Partial-commit helper
+    # Overlap-commit helpers
     # ------------------------------------------------------------------
 
-    def _extract_committed_text(self, result: TranscriptResult) -> str:
-        """Return the portion of *result* that lies before the overlap region.
+    def _strip_leading_overlap(
+        self, result: TranscriptResult
+    ) -> Optional[TranscriptResult]:
+        """Remove the start_overlap prefix already committed by the previous partial.
 
-        For a partial segment (``is_final=False``) the last ``overlap_ms`` of
-        audio is kept in the VAD buffer for the next window.  We must not send
-        words that fall inside that overlap — they will be re-transcribed with
-        better context next time.
+        After a partial emit, the current window commits words up to
+        ``duration_s − end_overlap_s``.  Those words reappear at
+        ``[0 … start_overlap_s]`` in the next window's audio.  Skipping them
+        here prevents double-sending.  The ``end_overlap_ms`` region that
+        follows (``[start_overlap_s … total_overlap_s]``) is new territory
+        and is committed by this segment.
 
-        Returns an empty string when no words fall before the commit boundary
-        (e.g. the speaker started right at the end of the window).
+        Resets ``_skip_overlap_s`` to zero unconditionally; call once per
+        segment.
+
+        Returns ``None`` when every word falls inside the skipped prefix
+        (i.e. nothing new to commit).
         """
-        commit_boundary_s = result.duration_s - self._overlap_s
+        skip_s = self._skip_overlap_s
+        self._skip_overlap_s = 0.0
+        if skip_s <= 0.0:
+            return result
+        kept = [w for w in result.words if w.end > skip_s]
+        if not kept:
+            log.debug("Overlap strip: no words remain after skipping %.2f s", skip_s)
+            return None
+        text = " ".join(w.word.strip() for w in kept).strip()
+        if not text:
+            return None
+        return TranscriptResult(
+            text=text,
+            language=result.language,
+            duration_s=result.duration_s,
+            words=kept,
+        )
+
+    def _commit_partial(self, result: TranscriptResult) -> str:
+        """Commit the words before the end_overlap boundary and schedule a skip.
+
+        The window is split into three regions::
+
+            [0 … commit_boundary]   committed now (start_overlap already stripped)
+            [commit_boundary … end] end_overlap region — NOT committed here;
+                                    committed by the *next* window after that
+                                    window's start_overlap prefix is stripped
+
+        ``commit_boundary = duration_s − end_overlap_s``
+
+        The end_overlap words are left to the next window so they can be
+        transcribed with more right-side audio context.  To avoid re-sending
+        the committed words, ``_skip_overlap_s`` is set to ``start_overlap_s``
+        so :meth:`_strip_leading_overlap` discards them from the next segment.
+
+        Returns an empty string when no words fall before the commit boundary.
+        """
+        commit_boundary_s = result.duration_s - self._end_overlap_s
         if commit_boundary_s <= 0 or not result.words:
             return ""
         committed = [w for w in result.words if w.end <= commit_boundary_s]
         if not committed:
             return ""
+        self._skip_overlap_s = self._start_overlap_s
         return " ".join(w.word.strip() for w in committed).strip()
 
     # ------------------------------------------------------------------
@@ -257,21 +315,35 @@ class Application:
             # ── Stabilization & send ──────────────────────────────────
             if speech_seg.is_final:
                 # Normal path: VAD detected silence → finalize immediately.
+                # Strip any overlap words already committed by the previous
+                # partial (they had better decoder context at end-of-window).
+                stripped = self._strip_leading_overlap(result)
+                if stripped is None:
+                    log.debug("Final segment: all words covered by prior overlap; skipping")
+                    continue
                 final_seg: Optional[TranscriptSegment] = self._stabilizer.update(
-                    result, is_final=True
+                    stripped, is_final=True
                 )
             else:
                 # Partial path: max_speech_ms triggered a mid-speech emit.
-                # Commit only the words before the overlap region; words
-                # inside the overlap will be re-transcribed next window.
-                committed_text = self._extract_committed_text(result)
+                # 1. Strip words from the previous partial's overlap (those
+                #    were committed with better end-of-window context).
+                # 2. Commit ALL remaining words — including the NEW overlap
+                #    region — because they sit at the end of this window
+                #    where the decoder has the most accumulated context.
+                # 3. Schedule a prefix-skip for the next segment so those
+                #    overlap words are not re-committed.
+                stripped = self._strip_leading_overlap(result)
+                if stripped is None:
+                    log.debug("Partial segment: all words in prior overlap; skipping")
+                    continue
+                committed_text = self._commit_partial(stripped)
                 if not committed_text:
-                    log.debug("Partial segment: no words before commit boundary; skipping")
                     continue
                 committed_result = TranscriptResult(
                     text=committed_text,
                     language=result.language,
-                    duration_s=result.duration_s - self._overlap_s,
+                    duration_s=result.duration_s,
                 )
                 final_seg = self._stabilizer.update(committed_result, is_final=True)
 
@@ -288,8 +360,9 @@ class Application:
             try:
                 with self._transcriber_lock:
                     result = self._transcriber.transcribe(trailing.audio)
-                if result.text:
-                    final_seg = self._stabilizer.update(result, is_final=True)
+                stripped = self._strip_leading_overlap(result)
+                if stripped is not None and stripped.text:
+                    final_seg = self._stabilizer.update(stripped, is_final=True)
                     if final_seg is not None:
                         self._server.send(final_seg)
             except Exception as exc:

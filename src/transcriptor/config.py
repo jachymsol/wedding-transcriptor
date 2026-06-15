@@ -42,9 +42,16 @@ class VADConfig(BaseModel):
     #: duration (milliseconds).  Set to 0 to disable — VAD will accumulate
     #: indefinitely until silence is detected.
     max_speech_ms: int = 10_000   # 10 s
-    #: Audio kept at the end of each partial buffer to give Whisper context
-    #: at the start of the next window (milliseconds).
-    overlap_ms: int = 3_000       # 3 s
+    #: Words at the *end* of a partial window have accumulated decoder context
+    #: and are therefore more reliable.  This many milliseconds of audio from
+    #: the end of the window are committed as-is and then *skipped* at the
+    #: start of the next window (to avoid re-committing with worse context).
+    end_overlap_ms: int = 1_000   # 1 s
+    #: Additional audio kept at the start of the next window purely as
+    #: transcription context.  These words appear right after the skipped
+    #: ``end_overlap_ms`` region and benefit from more right-side audio
+    #: than they had in the previous window.
+    start_overlap_ms: int = 2_000 # 2 s
 
 
 class AppConfig(BaseSettings):

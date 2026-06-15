@@ -41,7 +41,7 @@ def _make_config(**kwargs) -> AppConfig:
         audio=AudioConfig(device_id="default"),
         transcription=TranscriptionConfig(model="medium", language="en"),
         stabilization=StabilizationConfig(silence_ms=700, stable_ms=2000),
-        vad=VADConfig(max_speech_ms=10000, overlap_ms=3000),
+        vad=VADConfig(max_speech_ms=10000, end_overlap_ms=1000, start_overlap_ms=2000),
     )
     defaults.update(kwargs)
     return AppConfig(**defaults)
@@ -161,14 +161,15 @@ class TestSaveConfigYaml:
         p.write_text(yaml.dump({
             "event_id": "old",
             "transcription": {"model": "medium", "language": "cs"},
-            "vad": {"max_speech_ms": 8000, "overlap_ms": 2000},
+            "vad": {"max_speech_ms": 8000, "end_overlap_ms": 800, "start_overlap_ms": 1200},
         }))
         save_config_yaml(p, "new-event", "wss://x.com/ws", "default")
         data = yaml.safe_load(p.read_text())
         assert data["transcription"]["model"] == "medium"
         assert data["transcription"]["language"] == "cs"
         assert data["vad"]["max_speech_ms"] == 8000
-        assert data["vad"]["overlap_ms"] == 2000
+        assert data["vad"]["end_overlap_ms"] == 800
+        assert data["vad"]["start_overlap_ms"] == 1200
 
     def test_creates_file_if_absent(self, tmp_path):
         p = tmp_path / "new_config.yaml"
@@ -269,7 +270,8 @@ class TestStartupDialogStart:
     def test_vad_config_unchanged(self, dialog):
         result = self._start(dialog)
         assert result.vad.max_speech_ms == 10000
-        assert result.vad.overlap_ms == 3000
+        assert result.vad.end_overlap_ms == 1000
+        assert result.vad.start_overlap_ms == 2000
 
     def test_whitespace_trimmed_from_event_id(self, dialog):
         result = self._start(dialog, event_id="  trimmed-event  ")

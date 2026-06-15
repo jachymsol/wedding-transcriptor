@@ -43,8 +43,11 @@ class TestDefaults:
     def test_vad_max_speech_ms(self):
         assert VADConfig().max_speech_ms == 10_000
 
-    def test_vad_overlap_ms(self):
-        assert VADConfig().overlap_ms == 3_000
+    def test_vad_end_overlap_ms(self):
+        assert VADConfig().end_overlap_ms == 1_000
+
+    def test_vad_start_overlap_ms(self):
+        assert VADConfig().start_overlap_ms == 2_000
 
     def test_app_event_id(self):
         # Default when no YAML or env override is present
@@ -82,7 +85,7 @@ class TestYamlLoading:
             "audio": {"device_id": "usb-mixer"},
             "transcription": {"model": "small", "language": "cs"},
             "stabilization": {"silence_ms": 500, "stable_ms": 1500},
-            "vad": {"max_speech_ms": 5000, "overlap_ms": 2000},
+            "vad": {"max_speech_ms": 5000, "end_overlap_ms": 800, "start_overlap_ms": 1200},
         }
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml.dump(payload))
@@ -102,7 +105,8 @@ class TestYamlLoading:
         assert cfg.stabilization.silence_ms == 500
         assert cfg.stabilization.stable_ms == 1500
         assert cfg.vad.max_speech_ms == 5000
-        assert cfg.vad.overlap_ms == 2000
+        assert cfg.vad.end_overlap_ms == 800
+        assert cfg.vad.start_overlap_ms == 1200
 
     def test_missing_yaml_file_falls_back_to_defaults(self, tmp_path):
         """If the YAML file does not exist, all defaults still apply."""
@@ -147,14 +151,15 @@ class TestLoadConfig:
         assert isinstance(cfg.vad, VADConfig)
 
     def test_project_config_yaml_values(self):
-        """The values in the committed config.yaml match the spec defaults."""
+        """The values in the committed config.yaml match current operator config."""
         cfg = load_config()
         assert cfg.event_id == "wedding-2027"
         assert cfg.server.websocket_url == "wss://translate.example.com/ws"
         assert cfg.audio.device_id == "default"
         assert cfg.transcription.model == "medium"
         assert cfg.transcription.language == "en"
-        assert cfg.stabilization.silence_ms == 700
-        assert cfg.stabilization.stable_ms == 2000
-        assert cfg.vad.max_speech_ms == 10_000
-        assert cfg.vad.overlap_ms == 3_000
+        assert cfg.stabilization.silence_ms == 300
+        assert cfg.stabilization.stable_ms == 1500
+        assert cfg.vad.max_speech_ms == 4_000
+        assert cfg.vad.end_overlap_ms == 500
+        assert cfg.vad.start_overlap_ms == 1_000
