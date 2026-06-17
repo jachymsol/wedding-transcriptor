@@ -536,3 +536,109 @@ class TestMaxSpeechMs:
         assert final is not None
         assert final.is_final is True
         assert vad.state == "SILENCE"
+
+
+# ---------------------------------------------------------------------------
+# Latency timestamps — speech_start_mono / emit_mono
+# ---------------------------------------------------------------------------
+
+class TestLatencyTimestamps:
+    def test_final_segment_speech_start_mono_is_positive(self):
+        """speech_start_mono is set (> 0) when a final segment is emitted."""
+        vad, model = make_vad()
+        _feed_speech(vad, model, n_chunks=3)
+        seg = _feed_silence(vad, model)
+        assert seg is not None
+        assert seg.speech_start_mono > 0
+
+    def test_final_segment_emit_mono_after_speech_start(self):
+        """emit_mono is ≥ speech_start_mono for a final segment."""
+        vad, model = make_vad()
+        _feed_speech(vad, model, n_chunks=3)
+        seg = _feed_silence(vad, model)
+        assert seg is not None
+        assert seg.emit_mono >= seg.speech_start_mono
+
+    def test_flush_segment_has_timestamps_set(self):
+        """flush() produces a segment with both timestamp fields set."""
+        vad, model = make_vad()
+        _feed_speech(vad, model, n_chunks=3)
+        seg = vad.flush()
+        assert seg is not None
+        assert seg.speech_start_mono > 0
+        assert seg.emit_mono >= seg.speech_start_mono
+
+    def test_partial_segment_speech_start_mono_is_positive(self):
+        """speech_start_mono is set (> 0) when a partial segment is emitted."""
+        max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE
+        vad, model = _make_vad_with_max(max_ms, overlap_ms=0)
+
+        model.return_value.item.return_value = 1.0
+        vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+
+        seg = None
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                seg = result
+                break
+
+        assert seg is not None and seg.is_final is False
+        assert seg.speech_start_mono > 0
+
+    def test_partial_segment_emit_mono_after_speech_start(self):
+        """emit_mono is ≥ speech_start_mono for a partial segment."""
+        max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE
+        vad, model = _make_vad_with_max(max_ms, overlap_ms=0)
+
+        model.return_value.item.return_value = 1.0
+        vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+
+        seg = None
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                seg = result
+                break
+
+        assert seg is not None
+        assert seg.emit_mono >= seg.speech_start_mono
+
+    def test_second_partial_speech_start_is_prev_emit_minus_overlap(self):
+        """Option B: second partial's speech_start_mono = first partial's emit_mono − overlap_s.
+
+        With 2 overlap windows: overlap_s = 2 × 512 / 16000 = 0.064 s.
+        After the first partial is emitted at time T, _speech_start_mono is set to
+        T − 0.064 s.  The second partial must carry that value as speech_start_mono.
+        """
+        overlap_windows = 2
+        overlap_ms = overlap_windows * _VAD_WINDOW * 1000 // _SAMPLE_RATE  # ≈ 64 ms
+        max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE                    # ≈ 128 ms
+        overlap_s = overlap_windows * _VAD_WINDOW / _SAMPLE_RATE           # exact
+
+        vad, model = _make_vad_with_max(max_ms, overlap_ms=overlap_ms)
+        model.return_value.item.return_value = 1.0
+
+        # Enter SPEECH (1 window with speech_start_ms=32 → 1 window threshold)
+        vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+
+        # Collect first partial
+        seg1 = None
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                seg1 = result
+                break
+        assert seg1 is not None and seg1.is_final is False
+
+        # Collect second partial
+        seg2 = None
+        for _ in range(10):
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                seg2 = result
+                break
+        assert seg2 is not None and seg2.is_final is False
+
+        # Key invariant: seg2.speech_start_mono == seg1.emit_mono - overlap_s
+        assert seg2.speech_start_mono == pytest.approx(seg1.emit_mono - overlap_s)

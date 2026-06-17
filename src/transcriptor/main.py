@@ -37,9 +37,11 @@ continue without restarting the whole application.
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import signal
 import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -64,6 +66,9 @@ _STATUS_EVERY_N_CHUNKS: int = 10  # ≈ 1 s
 # VAD (~1 ms/window) produces far faster than Whisper (0.6–4 s/segment) consumes;
 # a small buffer lets bursts absorb without blocking audio capture.
 _SPEECH_QUEUE_SIZE: int = 10
+# Set TRANSCRIPTOR_LATENCY_LOG=1 to emit per-segment latency measurements.
+# Logs total latency (speech onset → transmit) and tail latency (emit → transmit).
+_LATENCY_LOGGING: bool = os.getenv("TRANSCRIPTOR_LATENCY_LOG", "") == "1"
 
 
 class Application:
@@ -402,6 +407,17 @@ class Application:
                 )
                 self._ui.update_transcript(final_seg.text)
                 self._server.send(final_seg)
+                if _LATENCY_LOGGING and seg.emit_mono > 0:
+                    _transmit_mono = time.monotonic()
+                    log.info(
+                        "LATENCY seg=%d total=%.3fs tail=%.3fs"
+                        " speech_dur=%.3fs is_final=%s",
+                        final_seg.segment_id,
+                        _transmit_mono - seg.speech_start_mono,
+                        _transmit_mono - seg.emit_mono,
+                        seg.emit_mono - seg.speech_start_mono,
+                        seg.is_final,
+                    )
 
         log.info("Transcription thread exiting")
 

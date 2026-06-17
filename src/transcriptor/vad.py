@@ -7,6 +7,7 @@ Emits SpeechSegment objects when a complete utterance is detected.
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -43,16 +44,28 @@ class SpeechSegment:
     """A speech utterance ready for transcription.
 
     Attributes:
-        audio:    float32 mono array at 16 kHz, concatenated from VAD windows.
-        is_final: ``True`` when the segment was closed by silence detection
-                  (normal end-of-utterance).  ``False`` when the segment was
-                  force-emitted because the buffer hit ``max_speech_ms`` —
-                  speech is still ongoing and the caller should extract only
-                  the committed portion (before the overlap region) rather
-                  than the full audio.
+        audio:            float32 mono array at 16 kHz, concatenated from VAD windows.
+        is_final:         ``True`` when the segment was closed by silence detection
+                          (normal end-of-utterance).  ``False`` when the segment was
+                          force-emitted because the buffer hit ``max_speech_ms`` —
+                          speech is still ongoing and the caller should extract only
+                          the committed portion (before the overlap region) rather
+                          than the full audio.
+        speech_start_mono: ``time.monotonic()`` timestamp of the first audio sample in
+                          this segment's buffer.  For the first segment of an utterance
+                          this equals the onset of speech.  For subsequent partial
+                          segments it equals ``prev_emit_mono − overlap_duration_s``,
+                          i.e. the real-time stamp of the overlap window that begins
+                          this segment's audio.  Zero when not set (legacy / tests).
+        emit_mono:        ``time.monotonic()`` timestamp captured immediately before
+                          the segment is returned by :meth:`VoiceActivityDetector._emit`
+                          or :meth:`VoiceActivityDetector._emit_partial`.  Zero when not
+                          set (legacy / tests).
     """
     audio: np.ndarray
     is_final: bool = True
+    speech_start_mono: float = 0.0
+    emit_mono: float = 0.0
 
 
 class VoiceActivityDetector:
@@ -130,6 +143,7 @@ class VoiceActivityDetector:
         self._speech_buf: list[np.ndarray] = []
         self._consec_speech = 0
         self._consec_silence = 0
+        self._speech_start_mono: float = 0.0  # set in _begin_speech(); updated in _emit_partial()
 
     # ------------------------------------------------------------------
     # Public API
@@ -237,6 +251,7 @@ class VoiceActivityDetector:
         self._state = _State.SPEECH
         self._speech_buf = list(self._pre_roll)  # pre-roll windows (includes onset)
         self._consec_silence = 0
+        self._speech_start_mono = time.monotonic()
         log.debug("Speech started")
 
     def _emit(self) -> SpeechSegment:
@@ -247,6 +262,7 @@ class VoiceActivityDetector:
             else np.empty(0, dtype=np.float32)
         )
         duration_s = len(audio) / _SAMPLE_RATE
+        emit_time = time.monotonic()
         log.debug("Speech segment: %.2f s", duration_s)
         # Reset state
         self._state = _State.SILENCE
@@ -255,7 +271,14 @@ class VoiceActivityDetector:
         self._consec_silence = 0
         self._pre_roll.clear()
         self._model.reset_states()  # clear GRU state for next utterance
-        return SpeechSegment(audio=audio, is_final=True)
+        seg = SpeechSegment(
+            audio=audio,
+            is_final=True,
+            speech_start_mono=self._speech_start_mono,
+            emit_mono=emit_time,
+        )
+        self._speech_start_mono = 0.0
+        return seg
 
     def _emit_partial(self) -> SpeechSegment:
         """Emit a partial segment mid-speech and reset the buffer with overlap.
@@ -266,6 +289,11 @@ class VoiceActivityDetector:
         has enough context to avoid boundary artefacts.
 
         The Silero GRU state is *not* reset because the speaker has not paused.
+
+        ``_speech_start_mono`` is advanced to ``emit_time − overlap_duration_s``
+        so the *next* segment's ``speech_start_mono`` reflects the real-time
+        timestamp of the first sample in its audio buffer (the start of the
+        kept overlap region), not the original speech onset.
         """
         audio = (
             np.concatenate(self._speech_buf)
@@ -273,11 +301,18 @@ class VoiceActivityDetector:
             else np.empty(0, dtype=np.float32)
         )
         duration_s = len(audio) / _SAMPLE_RATE
+        emit_time = time.monotonic()
         log.debug(
             "Partial speech segment: %.2f s (max_speech_ms reached; "
             "keeping %d overlap windows)",
             duration_s,
             self._overlap_windows,
+        )
+        seg = SpeechSegment(
+            audio=audio,
+            is_final=False,
+            speech_start_mono=self._speech_start_mono,
+            emit_mono=emit_time,
         )
         # Preserve the overlap tail — the rest is committed.
         self._speech_buf = (
@@ -287,8 +322,12 @@ class VoiceActivityDetector:
         )
         self._consec_speech = 0
         self._consec_silence = 0
+        # Advance speech_start_mono to the real-time stamp of the first sample
+        # in the kept overlap region.  The next segment's audio starts there.
+        overlap_s = self._overlap_windows * _VAD_WINDOW / _SAMPLE_RATE
+        self._speech_start_mono = emit_time - overlap_s
         # Stay in SPEECH state; do NOT reset model GRU state.
-        return SpeechSegment(audio=audio, is_final=False)
+        return seg
 
 
 # ---------------------------------------------------------------------------
