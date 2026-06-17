@@ -1,10 +1,12 @@
 """Whisper transcription module — FR-004.
 
-Wraps faster-whisper with automatic CUDA→CPU fallback and a mutable
-language setting that can be changed at runtime by the operator (FR-002).
-
+Uses mlx-whisper for Apple MLX GPU-accelerated inference on Apple Silicon.
 Model weights are downloaded from Hugging Face on first use and cached in
 ~/.cache/huggingface/hub/.  Subsequent starts use the local cache.
+
+The model is pre-warmed during construction by running a short dummy clip
+through it, so the first real speech segment does not pay the weight-loading
+latency cost.
 """
 
 from __future__ import annotations
@@ -19,10 +21,31 @@ from transcriptor.config import TranscriptionConfig
 
 log = logging.getLogger(__name__)
 
-_SAMPLE_RATE: int = 16_000       # must match AudioCapture and VAD
-_CUDA_COMPUTE: str = "float16"
-_CPU_COMPUTE: str = "int8"
-_CPU_MODEL: str = "small"        # spec §4 fallback
+_SAMPLE_RATE: int = 16_000  # must match AudioCapture and VAD
+
+# Short-name → full HF repo mapping for mlx-community models.
+_MLX_REPO_MAP: dict[str, str] = {
+    "tiny": "mlx-community/whisper-tiny",
+    "base": "mlx-community/whisper-base",
+    "small": "mlx-community/whisper-small",
+    "medium": "mlx-community/whisper-medium",
+    "large": "mlx-community/whisper-large-v3",
+    "large-v2": "mlx-community/whisper-large-v2",
+    "large-v3": "mlx-community/whisper-large-v3",
+}
+
+
+def _resolve_mlx_repo(model: str) -> str:
+    """Map a short model name to a full HF repo string.
+
+    Names that already contain ``"/"`` are returned unchanged, so users can
+    specify any MLX repo directly (e.g. ``"mlx-community/whisper-medium-4bit"``).
+    Short names (e.g. ``"medium"``) are looked up in *_MLX_REPO_MAP*;
+    unrecognised short names fall back to ``f"mlx-community/whisper-{model}"``.
+    """
+    if "/" in model:
+        return model
+    return _MLX_REPO_MAP.get(model, f"mlx-community/whisper-{model}")
 
 
 @dataclass
@@ -58,34 +81,8 @@ class TranscriptResult:
     words: list = field(default_factory=list)  # list[Word]
 
 
-def _load_whisper_model(model_name: str) -> Any:
-    """Load a WhisperModel with CUDA→CPU fallback.
-
-    Tries ``cuda / float16`` first (spec §4 default); falls back to
-    ``cpu / int8`` with the *small* model if CUDA is unavailable or
-    initialisation fails.
-
-    The ``faster_whisper`` import is deferred so the module can be
-    imported (and tested with a mock) without the library installed.
-    """
-    import torch
-    from faster_whisper import WhisperModel
-
-    if torch.cuda.is_available():
-        try:
-            model = WhisperModel(model_name, device="cuda", compute_type=_CUDA_COMPUTE)
-            log.info("Whisper '%s' loaded on CUDA (%s)", model_name, _CUDA_COMPUTE)
-            return model
-        except Exception as exc:  # noqa: BLE001
-            log.warning("CUDA init failed (%s) — falling back to CPU", exc)
-
-    model = WhisperModel(_CPU_MODEL, device="cpu", compute_type=_CPU_COMPUTE)
-    log.info("Whisper '%s' loaded on CPU (%s)", _CPU_MODEL, _CPU_COMPUTE)
-    return model
-
-
 class Transcriber:
-    """Transcribes speech audio using a local faster-whisper model.
+    """Transcribes speech audio using a local mlx-whisper model.
 
     The active language can be changed at any time via :meth:`set_language`
     so the operator can switch between speakers mid-event (FR-002).
@@ -104,14 +101,32 @@ class Transcriber:
         config:
             Transcription settings from ``config.yaml``.
         model:
-            Optional pre-built ``WhisperModel``.  When *None* the model is
-            loaded via :func:`_load_whisper_model`.  Pass a mock in tests to
-            avoid downloading real weights.
+            Optional callable with the signature
+            ``f(audio, *, path_or_hf_repo, language, word_timestamps,
+            beam_size, verbose, ...) -> dict``.
+            When *None*, ``mlx_whisper.transcribe`` is imported, the model
+            weights are pre-warmed with a short dummy clip (so the first real
+            segment is not delayed by weight loading), and the function is
+            stored as the callable.  Pass a mock callable in tests to avoid
+            downloading real weights.
         """
-        if model is None:
-            model = _load_whisper_model(config.model)
-        self._model = model
+        self._repo: str = _resolve_mlx_repo(config.model)
         self._language: str = config.language
+
+        if model is None:
+            import mlx_whisper as _mlx  # lazy import — skipped when model injected
+            log.info("Pre-warming mlx-whisper model '%s' …", self._repo)
+            _mlx.transcribe(
+                np.zeros(1600, dtype=np.float32),
+                path_or_hf_repo=self._repo,
+                language=self._language,
+                word_timestamps=False,
+                verbose=None,
+            )
+            log.info("mlx-whisper model ready.")
+            model = _mlx.transcribe
+
+        self._model = model
 
     # ------------------------------------------------------------------
     # Public API
@@ -143,25 +158,25 @@ class Transcriber:
         """
         duration_s = len(audio) / _SAMPLE_RATE
 
-        # vad_filter=False: our pipeline already runs Silero VAD externally.
-        # word_timestamps=True: needed for partial-commit boundary detection
-        # when max_speech_ms forces a mid-speech segment split.
-        segments_iter, _info = self._model.transcribe(
+        # beam_size omitted → defaults to None → greedy decoding.
+        # Any non-None beam_size raises NotImplementedError in mlx-whisper 0.4.x.
+        # verbose=None suppresses tqdm progress bar (verbose=False still shows it).
+        raw: dict = self._model(
             audio,
+            path_or_hf_repo=self._repo,
             language=self._language,
-            beam_size=5,
-            vad_filter=False,
             word_timestamps=True,
+            verbose=None,
         )
 
-        # Materialise the lazy iterator — faster-whisper yields segments on demand.
         all_words: list[Word] = []
         texts: list[str] = []
-        for seg in segments_iter:
-            if seg.text.strip():
-                texts.append(seg.text.strip())
-            for w in (seg.words or []):
-                all_words.append(Word(word=w.word, start=w.start, end=w.end))
+        for seg in raw.get("segments", []):
+            seg_text = seg.get("text", "").strip()
+            if seg_text:
+                texts.append(seg_text)
+            for w in seg.get("words", []):
+                all_words.append(Word(word=w["word"], start=w["start"], end=w["end"]))
 
         text = " ".join(texts)
 

@@ -1,53 +1,65 @@
 """Tests for transcriptor.transcription — Transcriber logic.
 
-All tests inject a MagicMock in place of the real WhisperModel so that
-no model weights are downloaded and tests run in milliseconds.
+All tests inject a callable MagicMock in place of the real mlx_whisper.transcribe
+so that no model weights are downloaded and tests run in milliseconds.
 
 Mock contract
 -------------
-faster-whisper's WhisperModel.transcribe() returns
-    (Iterator[Segment], TranscriptionInfo)
-where each Segment has a .text attribute.
+mlx_whisper.transcribe(audio, *, path_or_hf_repo, language, word_timestamps,
+                        beam_size, verbose, ...) returns a dict::
+
+    {
+        "text": str,
+        "language": str,
+        "segments": [
+            {
+                "text": str,
+                "words": [
+                    {"word": str, "start": float, "end": float, "probability": float},
+                    ...
+                ]
+            },
+            ...
+        ]
+    }
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 from transcriptor.config import TranscriptionConfig
-from transcriptor.transcription import Transcriber, TranscriptResult, Word, _SAMPLE_RATE
+from transcriptor.transcription import (
+    Transcriber,
+    TranscriptResult,
+    Word,
+    _SAMPLE_RATE,
+    _resolve_mlx_repo,
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_word(word: str, start: float, end: float) -> MagicMock:
-    """Return a mock faster-whisper Word."""
-    w = MagicMock()
-    w.word = word
-    w.start = start
-    w.end = end
-    return w
+def _make_word(word: str, start: float, end: float) -> dict:
+    """Return a mock mlx-whisper word dict."""
+    return {"word": word, "start": start, "end": end, "probability": 1.0}
 
 
-def _make_segment(text: str, words=None) -> MagicMock:
-    seg = MagicMock()
-    seg.text = text
-    seg.words = words if words is not None else []
-    return seg
+def _make_segment(text: str, words=None) -> dict:
+    return {"text": text, "words": words if words is not None else []}
 
 
 def _make_whisper_model(segment_texts: list[str] | None = None) -> MagicMock:
-    """Return a mock WhisperModel whose transcribe() yields the given texts."""
+    """Return a callable mock mimicking mlx_whisper.transcribe()."""
     if segment_texts is None:
         segment_texts = []
     segments = [_make_segment(t) for t in segment_texts]
-    info = MagicMock()
     model = MagicMock()
-    model.transcribe.return_value = (iter(segments), info)
+    model.return_value = {"text": "", "language": "en", "segments": segments}
     return model
 
 
@@ -105,6 +117,24 @@ class TestTranscriptResult:
 
 
 # ---------------------------------------------------------------------------
+# _resolve_mlx_repo
+# ---------------------------------------------------------------------------
+
+class TestResolveMLXRepo:
+    def test_known_short_name_medium(self):
+        assert _resolve_mlx_repo("medium") == "mlx-community/whisper-medium"
+
+    def test_known_short_name_tiny(self):
+        assert _resolve_mlx_repo("tiny") == "mlx-community/whisper-tiny"
+
+    def test_full_repo_passes_through_unchanged(self):
+        assert _resolve_mlx_repo("mlx-community/whisper-medium") == "mlx-community/whisper-medium"
+
+    def test_full_repo_with_quantisation_suffix_passes_through(self):
+        assert _resolve_mlx_repo("mlx-community/whisper-medium-4bit") == "mlx-community/whisper-medium-4bit"
+
+
+# ---------------------------------------------------------------------------
 # Transcriber construction
 # ---------------------------------------------------------------------------
 
@@ -119,13 +149,12 @@ class TestTranscriberInit:
         t = Transcriber(config, model=model)
         assert t._model is model
 
-    def test_model_factory_not_called_when_model_provided(self):
-        """_load_whisper_model should never be called when a model is injected."""
-        with patch("transcriptor.transcription._load_whisper_model") as mock_load:
-            model = _make_whisper_model()
-            config = TranscriptionConfig()
-            Transcriber(config, model=model)
-            mock_load.assert_not_called()
+    def test_no_prewarm_when_model_injected(self):
+        """Injected callable must not be called during __init__ (no pre-warming)."""
+        model = _make_whisper_model()
+        config = TranscriptionConfig()
+        Transcriber(config, model=model)
+        model.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -179,35 +208,42 @@ class TestTranscribe:
 # ---------------------------------------------------------------------------
 
 class TestTranscribeModelCall:
-    def test_model_transcribe_called_once_per_call(self):
+    def test_model_called_once_per_transcription(self):
         t, model = _make_transcriber(["hi"])
         t.transcribe(AUDIO_1S)
-        assert model.transcribe.call_count == 1
+        assert model.call_count == 1
 
     def test_language_passed_to_model(self):
         t, model = _make_transcriber(["hi"], language="pl")
         t.transcribe(AUDIO_1S)
-        _, kwargs = model.transcribe.call_args
+        _, kwargs = model.call_args
         assert kwargs["language"] == "pl"
-
-    def test_vad_filter_disabled(self):
-        """vad_filter must be False — our pipeline already runs VAD externally."""
-        t, model = _make_transcriber(["hi"])
-        t.transcribe(AUDIO_1S)
-        _, kwargs = model.transcribe.call_args
-        assert kwargs["vad_filter"] is False
 
     def test_word_timestamps_enabled(self):
         """word_timestamps=True must be passed so we can do partial commits."""
         t, model = _make_transcriber(["hi"])
         t.transcribe(AUDIO_1S)
-        _, kwargs = model.transcribe.call_args
+        _, kwargs = model.call_args
         assert kwargs["word_timestamps"] is True
+
+    def test_path_or_hf_repo_passed_to_model(self):
+        """path_or_hf_repo must be the resolved HF repo string."""
+        t, model = _make_transcriber(["hi"], model_name="medium")
+        t.transcribe(AUDIO_1S)
+        _, kwargs = model.call_args
+        assert kwargs["path_or_hf_repo"] == "mlx-community/whisper-medium"
+
+    def test_verbose_none_passed_to_model(self):
+        """verbose=None must be passed to suppress tqdm output."""
+        t, model = _make_transcriber(["hi"])
+        t.transcribe(AUDIO_1S)
+        _, kwargs = model.call_args
+        assert kwargs["verbose"] is None
 
     def test_audio_array_passed_to_model(self):
         t, model = _make_transcriber(["hi"])
         t.transcribe(AUDIO_1S)
-        args, _ = model.transcribe.call_args
+        args, _ = model.call_args
         passed_audio = args[0]
         assert np.array_equal(passed_audio, AUDIO_1S)
 
@@ -229,10 +265,10 @@ class TestLanguageSwitching:
     def test_new_language_used_in_next_transcription(self):
         t, model = _make_transcriber(language="en")
         # Re-arm the mock for a second call
-        model.transcribe.return_value = (iter([]), MagicMock())
+        model.return_value = {"text": "", "language": "pl", "segments": []}
         t.set_language("pl")
         t.transcribe(AUDIO_1S)
-        _, kwargs = model.transcribe.call_args
+        _, kwargs = model.call_args
         assert kwargs["language"] == "pl"
 
     def test_set_language_multiple_times(self):
@@ -243,59 +279,14 @@ class TestLanguageSwitching:
 
 
 # ---------------------------------------------------------------------------
-# _load_whisper_model — CUDA / CPU fallback logic
-# ---------------------------------------------------------------------------
-
-class TestLoadWhisperModel:
-    def test_uses_cuda_when_available(self):
-        from transcriptor.transcription import _load_whisper_model
-
-        with patch("torch.cuda.is_available", return_value=True), \
-             patch("faster_whisper.WhisperModel") as MockModel:
-            MockModel.return_value = MagicMock()
-            _load_whisper_model("medium")
-            MockModel.assert_called_once_with("medium", device="cuda", compute_type="float16")
-
-    def test_falls_back_to_cpu_when_cuda_unavailable(self):
-        from transcriptor.transcription import _load_whisper_model
-
-        with patch("torch.cuda.is_available", return_value=False), \
-             patch("faster_whisper.WhisperModel") as MockModel:
-            MockModel.return_value = MagicMock()
-            _load_whisper_model("medium")
-            MockModel.assert_called_once_with("small", device="cpu", compute_type="int8")
-
-    def test_falls_back_to_cpu_when_cuda_init_raises(self):
-        from transcriptor.transcription import _load_whisper_model
-
-        call_count = 0
-
-        def model_factory(name, device, compute_type):
-            nonlocal call_count
-            call_count += 1
-            if device == "cuda":
-                raise RuntimeError("out of memory")
-            m = MagicMock()
-            return m
-
-        with patch("torch.cuda.is_available", return_value=True), \
-             patch("faster_whisper.WhisperModel", side_effect=model_factory):
-            model = _load_whisper_model("medium")
-
-        # First call (cuda) failed; second call (cpu) succeeded
-        assert call_count == 2
-
-
-# ---------------------------------------------------------------------------
-# Word collection — words extracted from segment.words
+# Word collection — words extracted from segment dicts
 # ---------------------------------------------------------------------------
 
 class TestWordCollection:
     def _make_model_with_words(self, text: str, words: list) -> MagicMock:
         seg = _make_segment(text, words=words)
-        info = MagicMock()
         model = MagicMock()
-        model.transcribe.return_value = (iter([seg]), info)
+        model.return_value = {"text": text, "language": "en", "segments": [seg]}
         return model
 
     def test_words_collected_from_segment(self):
@@ -322,9 +313,8 @@ class TestWordCollection:
         w2 = _make_word(" world", 0.5, 0.9)
         seg1 = _make_segment("hello", words=[w1])
         seg2 = _make_segment("world", words=[w2])
-        info = MagicMock()
         model = MagicMock()
-        model.transcribe.return_value = (iter([seg1, seg2]), info)
+        model.return_value = {"text": "hello world", "language": "en", "segments": [seg1, seg2]}
         config = TranscriptionConfig(model="medium", language="en")
         t = Transcriber(config, model=model)
         result = t.transcribe(AUDIO_1S)
@@ -334,9 +324,8 @@ class TestWordCollection:
 
     def test_empty_words_when_segment_has_no_words(self):
         seg = _make_segment("hello", words=[])
-        info = MagicMock()
         model = MagicMock()
-        model.transcribe.return_value = (iter([seg]), info)
+        model.return_value = {"text": "hello", "language": "en", "segments": [seg]}
         config = TranscriptionConfig(model="medium", language="en")
         t = Transcriber(config, model=model)
         result = t.transcribe(AUDIO_1S)

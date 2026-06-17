@@ -1,13 +1,13 @@
 event_id: wedding-2027
 
 server:
-  websocket_url: wss://translate.example.com/ws
+  websocket_url: ws://localhost:3000/ws/ingest?token=your-secret-api-key
 
 audio:
   device_id: default
 
 transcription:
-  model: medium
+  model: mlx-community/whisper-medium
   language: en
 
 stabilization:

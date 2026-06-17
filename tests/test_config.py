@@ -156,7 +156,7 @@ class TestLoadConfig:
         assert cfg.event_id == "wedding-2027"
         assert cfg.server.websocket_url == "wss://translate.example.com/ws"
         assert cfg.audio.device_id == "default"
-        assert cfg.transcription.model == "medium"
+        assert cfg.transcription.model == "mlx-community/whisper-medium"
         assert cfg.transcription.language == "en"
         assert cfg.stabilization.silence_ms == 300
         assert cfg.stabilization.stable_ms == 1500
