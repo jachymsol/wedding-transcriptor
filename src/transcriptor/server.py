@@ -34,6 +34,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import urllib.error
@@ -139,6 +140,7 @@ class ServerClient:
     ) -> None:
         self._url_ws = config.server.websocket_url
         self._url_http = _ws_url_to_http(self._url_ws)
+        self._event_id = config.event_id
         self._queue = queue
         self._ws_factory = ws_factory or _default_ws_factory
         self._http_poster = http_poster or _default_http_poster
@@ -177,6 +179,40 @@ class ServerClient:
         if self._try_send_now(segment):
             return
         self._queue.enqueue(segment)
+
+    def send_control(self, action: str) -> None:
+        """Send a control message over the active WebSocket connection.
+
+        For ``action="start"``: if no WebSocket is currently open the message
+        is **not** queued — it will be sent automatically by :meth:`_try_ws`
+        on the next (re-)connection, before any queued segments are drained.
+
+        For ``action="stop"``: fire-and-forget.  If the connection is already
+        closed the call returns silently without raising.
+
+        Thread-safe: may be called from any thread.
+        """
+        payload = json.dumps({
+            "type": "control",
+            "action": action,
+            "event_id": self._event_id,
+        })
+        with self._state_lock:
+            state = self._state
+            ws = self._ws_conn
+        if state == ConnectionState.CONNECTED_WS and ws is not None:
+            try:
+                ws.send(payload)
+                log.info("Control message sent: action=%s", action)
+            except Exception as exc:
+                log.warning("Failed to send control message (action=%s): %s", action, exc)
+                with self._state_lock:
+                    self._state = ConnectionState.DISCONNECTED
+                    self._ws_conn = None
+        else:
+            log.debug(
+                "Control message (action=%s) skipped — no active WebSocket", action
+            )
 
     def start(self) -> None:
         """Start the background reconnect/drain thread."""
@@ -236,6 +272,7 @@ class ServerClient:
         log.info("WebSocket connected to %s", self._url_ws)
 
         try:
+            self._send_control_on_ws(ws, "start")
             self._drain_queue()
             self._ws_recv_loop(ws)
         except Exception as exc:
@@ -244,6 +281,19 @@ class ServerClient:
             self._close_ws()
 
         return True  # we established a connection (even if it dropped later)
+
+    def _send_control_on_ws(self, ws, action: str) -> None:
+        """Send a control message directly on *ws* (called from the server thread)."""
+        payload = json.dumps({
+            "type": "control",
+            "action": action,
+            "event_id": self._event_id,
+        })
+        try:
+            ws.send(payload)
+            log.info("Control message sent: action=%s", action)
+        except Exception as exc:
+            log.warning("Failed to send control message (action=%s): %s", action, exc)
 
     def _ws_recv_loop(self, ws) -> None:
         """Block until the WebSocket closes or :meth:`stop` is called."""

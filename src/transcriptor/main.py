@@ -178,6 +178,7 @@ class Application:
             self._vad_thread.join(timeout=5.0)
         if self._transcription_thread is not None:
             self._transcription_thread.join(timeout=10.0)
+        self._server.send_control("stop")
         self._server.stop()
         self._queue.close()
         log.info("Shutdown complete")
