@@ -65,7 +65,7 @@ class ConnectionState(Enum):
 # Default transport implementations
 # ---------------------------------------------------------------------------
 
-def _default_ws_factory(url: str):
+def _default_ws_factory(url: str, additional_headers: dict | None = None):
     """Open a synchronous WebSocket connection (requires websockets >= 12)."""
     try:
         from websockets.sync.client import connect
@@ -73,7 +73,7 @@ def _default_ws_factory(url: str):
         raise RuntimeError(
             "websockets package not installed; run: pip install websockets"
         ) from exc
-    return connect(url)
+    return connect(url, additional_headers=additional_headers or {})
 
 
 def _default_http_poster(url: str, payload: bytes) -> bool:
@@ -141,6 +141,7 @@ class ServerClient:
         self._url_ws = config.server.websocket_url
         self._url_http = _ws_url_to_http(self._url_ws)
         self._event_id = config.event_id
+        self._api_key = config.api_key
         self._queue = queue
         self._ws_factory = ws_factory or _default_ws_factory
         self._http_poster = http_poster or _default_http_poster
@@ -261,7 +262,8 @@ class ServerClient:
     def _try_ws(self) -> bool:
         """Attempt WebSocket connection; return True if it succeeded."""
         try:
-            ws = self._ws_factory(self._url_ws)
+            headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+            ws = self._ws_factory(self._url_ws, additional_headers=headers)
         except Exception as exc:
             log.warning("WebSocket connect failed (%s): %s", self._url_ws, exc)
             return False

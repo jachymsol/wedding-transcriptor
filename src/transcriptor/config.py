@@ -56,6 +56,7 @@ class VADConfig(BaseModel):
 
 class AppConfig(BaseSettings):
     event_id: str = "wedding-2027"
+    api_key: str = ""
     server: ServerConfig = ServerConfig()
     audio: AudioConfig = AudioConfig()
     transcription: TranscriptionConfig = TranscriptionConfig()

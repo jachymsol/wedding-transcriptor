@@ -43,9 +43,12 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+import urllib.error
+import urllib.request
 from pathlib import Path
 from tkinter import ttk
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
 import yaml
 
@@ -110,11 +113,12 @@ def save_config_yaml(
     event_id: str,
     websocket_url: str,
     device_id: str,
+    api_key: str = "",
 ) -> None:
-    """Persist the three operator-facing fields to *path* (config.yaml).
+    """Persist the operator-facing fields to *path* (config.yaml).
 
     Loads the existing file (or starts from an empty dict if absent), patches
-    only the three specified keys, and writes back.  All other keys
+    only the specified keys, and writes back.  All other keys
     (``model``, ``vad``, ``stabilization``, …) are preserved.
 
     Parameters
@@ -127,6 +131,8 @@ def save_config_yaml(
         New value for ``server.websocket_url``.
     device_id:
         New value for ``audio.device_id``.
+    api_key:
+        New value for the top-level ``api_key`` key.
     """
     try:
         data: dict = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
@@ -134,6 +140,7 @@ def save_config_yaml(
         data = {}
 
     data["event_id"] = event_id
+    data["api_key"] = api_key
     data.setdefault("server", {})["websocket_url"] = websocket_url
     data.setdefault("audio", {})["device_id"] = device_id
 
@@ -179,6 +186,7 @@ class StartupDialog:
         # StringVars — created before _build_ui so tests can read them
         self._event_id_var = tk.StringVar(value=config.event_id)
         self._server_url_var = tk.StringVar(value=config.server.websocket_url)
+        self._api_key_var = tk.StringVar(value=config.api_key)
         self._device_var = tk.StringVar()
         self._save_default_var = tk.BooleanVar(value=False)
 
@@ -238,9 +246,20 @@ class StartupDialog:
             width=46,
         ).grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
 
+        # ── API Key ───────────────────────────────────────────────────
+        tk.Label(self._root, text="API Key", font=_LABEL_FONT).grid(
+            row=5, column=0, columnspan=3, sticky="w", pady=(0, 2)
+        )
+        tk.Entry(
+            self._root,
+            textvariable=self._api_key_var,
+            font=_BODY_FONT,
+            width=46,
+        ).grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+
         # ── Audio Device ──────────────────────────────────────────────
         tk.Label(self._root, text="Audio Device", font=_LABEL_FONT).grid(
-            row=5, column=0, columnspan=3, sticky="w", pady=(0, 2)
+            row=7, column=0, columnspan=3, sticky="w", pady=(0, 2)
         )
 
         self._device_combo = ttk.Combobox(
@@ -250,13 +269,13 @@ class StartupDialog:
             width=38,
             font=_BODY_FONT,
         )
-        self._device_combo.grid(row=6, column=0, columnspan=2, sticky="ew")
+        self._device_combo.grid(row=8, column=0, columnspan=2, sticky="ew")
 
         tk.Button(
             self._root,
             text="Refresh",
             command=self._on_refresh,
-        ).grid(row=6, column=2, padx=(6, 0), sticky="w")
+        ).grid(row=8, column=2, padx=(6, 0), sticky="w")
 
         self._warn_label = tk.Label(
             self._root,
@@ -265,7 +284,7 @@ class StartupDialog:
             fg="#c0392b",
             anchor="w",
         )
-        self._warn_label.grid(row=7, column=0, columnspan=3, sticky="w")
+        self._warn_label.grid(row=9, column=0, columnspan=3, sticky="w")
         self._warn_label.grid_remove()   # hidden until needed
 
         # ── Save as default ───────────────────────────────────────────
@@ -274,17 +293,37 @@ class StartupDialog:
             text="Save as default (update config.yaml)",
             variable=self._save_default_var,
             font=_BODY_FONT,
-        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(12, 0))
+
+        # ── Register status label ─────────────────────────────────────
+        self._register_status_var = tk.StringVar(value="")
+        self._register_status_label = tk.Label(
+            self._root,
+            textvariable=self._register_status_var,
+            font=_WARN_FONT,
+            anchor="w",
+        )
+        self._register_status_label.grid(
+            row=11, column=0, columnspan=3, sticky="w", pady=(12, 0)
+        )
+        self._register_status_label.grid_remove()  # hidden until needed
 
         # ── Buttons ───────────────────────────────────────────────────
         btn_frame = tk.Frame(self._root)
-        btn_frame.grid(row=9, column=0, columnspan=3, sticky="e", pady=(16, 0))
+        btn_frame.grid(row=12, column=0, columnspan=3, sticky="e", pady=(16, 0))
 
         tk.Button(
             btn_frame,
             text="Cancel",
             width=10,
             command=self._on_cancel,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Button(
+            btn_frame,
+            text="Register",
+            width=10,
+            command=self._on_register,
         ).pack(side=tk.LEFT, padx=(0, 8))
 
         tk.Button(
@@ -339,16 +378,64 @@ class StartupDialog:
     # Button handlers
     # ------------------------------------------------------------------
 
+    def _on_register(self) -> None:
+        """POST /admin/events/:event_id — registers the event without starting."""
+        event_id = self._event_id_var.get().strip() or self._base_config.event_id
+        ws_url = (
+            self._server_url_var.get().strip()
+            or self._base_config.server.websocket_url
+        )
+        http_base = self._ws_url_to_http(ws_url).rstrip("/")
+        # Strip any path suffix the websocket URL may carry (e.g. "/ws")
+        # so we post to the server root + /admin/events/:event_id.
+        parsed = urlparse(http_base)
+        base_no_path = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
+        url = f"{base_no_path}/admin/events/{event_id}"
+
+        log.info("Registering event: POST %s", url)
+        try:
+            req = urllib.request.Request(url, method="POST")
+            api_key = self._api_key_var.get().strip()
+            if api_key:
+                req.add_header("Authorization", f"Bearer {api_key}")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+
+        if 200 <= status < 300:
+            msg = f"Event '{event_id}' registered (HTTP {status})."
+            colour = "#27ae60"
+        else:
+            msg = f"Registration failed (HTTP {status})."
+            colour = "#c0392b"
+
+        self._register_status_var.set(msg)
+        self._register_status_label.configure(fg=colour)
+        self._register_status_label.grid()
+        log.info("Register event result: %s", msg)
+
+    @staticmethod
+    def _ws_url_to_http(ws_url: str) -> str:
+        """Rewrite ``wss://`` → ``https://`` or ``ws://`` → ``http://``."""
+        if ws_url.startswith("wss://"):
+            return "https://" + ws_url[6:]
+        if ws_url.startswith("ws://"):
+            return "http://" + ws_url[5:]
+        return ws_url  # already HTTP or unknown scheme
+
     def _on_start(self) -> None:
         event_id = self._event_id_var.get().strip() or self._base_config.event_id
         server_url = (
             self._server_url_var.get().strip()
             or self._base_config.server.websocket_url
         )
+        api_key = self._api_key_var.get().strip()
         device_id = label_to_device_id(self._device_var.get(), self._devices)
 
         self._result = AppConfig(
             event_id=event_id,
+            api_key=api_key,
             server=ServerConfig(websocket_url=server_url),
             audio=AudioConfig(device_id=device_id),
             transcription=self._base_config.transcription,
@@ -358,7 +445,7 @@ class StartupDialog:
 
         if self._save_default_var.get():
             try:
-                save_config_yaml(CONFIG_FILE, event_id, server_url, device_id)
+                save_config_yaml(CONFIG_FILE, event_id, server_url, device_id, api_key)
             except Exception as exc:
                 log.error("Failed to save config.yaml: %s", exc)
 

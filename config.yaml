@@ -1,7 +1,8 @@
 event_id: wedding-2027
+api_key: your-secret-api-key
 
 server:
-  websocket_url: ws://localhost:3000/ws/ingest?token=your-secret-api-key
+  websocket_url: ws://localhost:3000/ws/ingest
 
 audio:
   device_id: default
