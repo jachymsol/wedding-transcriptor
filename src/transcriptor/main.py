@@ -147,13 +147,19 @@ class Application:
         self._speech_queue: queue.Queue = queue.Queue(maxsize=_SPEECH_QUEUE_SIZE)
         self._vad_thread: Optional[threading.Thread] = None
         self._transcription_thread: Optional[threading.Thread] = None
+        self._restart_requested: bool = False
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def run(self) -> None:
-        """Start all components and enter the tkinter main loop (blocking)."""
+    def run(self) -> bool:
+        """Start all components and enter the tkinter main loop (blocking).
+
+        Returns ``True`` if the operator clicked "End Event" (caller should
+        show the startup dialog again), ``False`` if the window was closed
+        normally.
+        """
         self._wire_ui_callbacks()
         self._audio.start()
         self._server.start()
@@ -178,6 +184,7 @@ class Application:
         self._ui.run()  # blocks until window is closed
 
         self._shutdown()
+        return self._restart_requested
 
     def _shutdown(self) -> None:
         log.info("Shutting down …")
@@ -204,6 +211,7 @@ class Application:
         self._ui.set_on_language_change(self._on_language_change)
         self._ui.set_on_restart(self._on_restart_transcriber)
         self._ui.set_on_device_change(self._on_device_change)
+        self._ui.set_on_end_event(self._on_end_event)
         # Close button → shut down gracefully
         try:
             self._ui._root.protocol("WM_DELETE_WINDOW", self._on_window_close)
@@ -233,6 +241,11 @@ class Application:
         self._audio = AudioCapture(AudioConfig(device_id=device_id))
         self._audio.start()
         log.info("Audio device switched to: %s", device_id)
+
+    def _on_end_event(self) -> None:
+        log.info("End Event requested by operator — returning to startup")
+        self._restart_requested = True
+        self._ui.stop()  # exits mainloop → _shutdown() → run() returns True
 
     # ------------------------------------------------------------------
     # Overlap-commit helpers
@@ -449,13 +462,16 @@ def main() -> None:
 
     from transcriptor.startup import StartupDialog  # deferred: avoids tkinter at import time
 
-    dialog = StartupDialog(load_config())
-    config = dialog.run()          # blocks until Start or Cancel
-    if config is None:
-        log.info("Startup cancelled by operator — exiting")
-        return
+    while True:
+        dialog = StartupDialog(load_config())
+        config = dialog.run()          # blocks until Start or Cancel
+        if config is None:
+            log.info("Startup cancelled by operator — exiting")
+            return
 
-    Application(config=config).run()
+        restart = Application(config=config).run()
+        if not restart:
+            break
 
 
 if __name__ == "__main__":

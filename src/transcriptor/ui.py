@@ -146,6 +146,7 @@ class AppUI:
         self._on_language_change: Optional[Callable[[str], None]] = None
         self._on_restart: Optional[Callable[[], None]] = None
         self._on_device_change: Optional[Callable[[str], None]] = None
+        self._on_end_event: Optional[Callable[[], None]] = None
 
         self._build_ui()
 
@@ -192,6 +193,10 @@ class AppUI:
     def set_on_restart(self, callback: Callable[[], None]) -> None:
         """Register *callback()* invoked when the operator clicks Restart."""
         self._on_restart = callback
+
+    def set_on_end_event(self, callback: Callable[[], None]) -> None:
+        """Register *callback()* invoked when the operator clicks End Event."""
+        self._on_end_event = callback
 
     def set_on_device_change(self, callback: Callable[[str], None]) -> None:
         """Register *callback(device_id)* invoked when the operator selects a device."""
@@ -306,14 +311,24 @@ class AppUI:
         )
         self._transcript_text.pack(fill=tk.BOTH, expand=True, pady=(2, 8))
 
-        # ── Restart button ────────────────────────────────────────────
+        # ── Restart / End Event buttons ───────────────────────────────
+        btn_frame = tk.Frame(self._root)
+        btn_frame.pack(anchor="e", pady=(0, 4))
+
         self._restart_btn = tk.Button(
-            self._root,
+            btn_frame,
             text="Restart Transcriber",
             command=self._on_restart_clicked,
             state=tk.DISABLED,
         )
-        self._restart_btn.pack(anchor="e", pady=(0, 4))
+        self._restart_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        self._end_event_btn = tk.Button(
+            btn_frame,
+            text="End Event",
+            command=self._on_end_event_clicked,
+        )
+        self._end_event_btn.pack(side=tk.LEFT)
 
         # ── Server status bar ─────────────────────────────────────────
         self._server_label = tk.Label(
@@ -390,3 +405,7 @@ class AppUI:
     def _on_restart_clicked(self) -> None:
         if self._on_restart is not None:
             self._on_restart()
+
+    def _on_end_event_clicked(self) -> None:
+        if self._on_end_event is not None:
+            self._on_end_event()
