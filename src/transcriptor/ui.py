@@ -40,6 +40,8 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable, Optional
 
+from transcriptor.startup import build_device_labels, label_to_device_id, DEVICE_LABEL_DEFAULT
+
 # ---------------------------------------------------------------------------
 # Language table
 # ---------------------------------------------------------------------------
@@ -129,16 +131,21 @@ class AppUI:
         title: str = "Wedding Transcriptor",
         *,
         event_id: str = "",
+        devices: Optional[list[dict]] = None,
+        device_id: str = "default",
         root: Optional[tk.Tk] = None,
     ) -> None:
         self._root: tk.Tk = root if root is not None else tk.Tk()
         self._root.title(f"{title}: {event_id}" if event_id else title)
         self._root.resizable(True, True)
         self._event_id: str = event_id
+        self._devices: list[dict] = devices if devices is not None else []
+        self._current_device_id: str = device_id
 
         # Callbacks registered by the caller
         self._on_language_change: Optional[Callable[[str], None]] = None
         self._on_restart: Optional[Callable[[], None]] = None
+        self._on_device_change: Optional[Callable[[str], None]] = None
 
         self._build_ui()
 
@@ -185,6 +192,14 @@ class AppUI:
     def set_on_restart(self, callback: Callable[[], None]) -> None:
         """Register *callback()* invoked when the operator clicks Restart."""
         self._on_restart = callback
+
+    def set_on_device_change(self, callback: Callable[[str], None]) -> None:
+        """Register *callback(device_id)* invoked when the operator selects a device."""
+        self._on_device_change = callback
+
+    def get_device(self) -> str:
+        """Return the currently selected device_id string."""
+        return label_to_device_id(self._device_var.get(), self._devices)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -248,6 +263,32 @@ class AppUI:
         )
         self._lang_combo.pack(side=tk.LEFT)
         self._lang_combo.bind("<<ComboboxSelected>>", self._on_lang_selected)
+
+        # ── Audio device selector ─────────────────────────────────────
+        device_frame = tk.Frame(self._root)
+        device_frame.pack(fill=tk.X, pady=(0, 8))
+
+        tk.Label(device_frame, text="Audio Device:", font=self._LABEL_FONT).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+
+        self._device_var = tk.StringVar()
+        self._device_combo = ttk.Combobox(
+            device_frame,
+            textvariable=self._device_var,
+            state="readonly",
+            width=30,
+        )
+        self._device_combo.pack(side=tk.LEFT)
+        self._device_combo.bind("<<ComboboxSelected>>", self._on_device_selected)
+
+        tk.Button(
+            device_frame,
+            text="Refresh",
+            command=self._on_device_refresh,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+
+        self._populate_device_combo(self._devices, self._current_device_id)
 
         # ── Current speech ────────────────────────────────────────────
         tk.Label(self._root, text="Current Speech", font=self._LABEL_FONT).pack(
@@ -320,6 +361,31 @@ class AppUI:
         code = _LABEL_TO_CODE.get(label, DEFAULT_LANGUAGE_CODE)
         if self._on_language_change is not None:
             self._on_language_change(code)
+
+    def _on_device_selected(self, _event=None) -> None:
+        device_id = label_to_device_id(self._device_var.get(), self._devices)
+        if self._on_device_change is not None:
+            self._on_device_change(device_id)
+
+    def _on_device_refresh(self) -> None:
+        try:
+            from transcriptor.audio import list_input_devices
+            self._devices = list_input_devices()
+        except Exception:
+            self._devices = []
+        self._populate_device_combo(self._devices, self._current_device_id)
+
+    def _populate_device_combo(self, devices: list[dict], device_id: str) -> None:
+        """Repopulate the device combobox and pre-select *device_id*."""
+        labels = build_device_labels(devices)
+        self._device_combo.configure(values=labels)
+        # Find matching label for the current device_id
+        selected = DEVICE_LABEL_DEFAULT
+        for d in devices:
+            if d["name"] == device_id or str(d["index"]) == device_id:
+                selected = d["name"]
+                break
+        self._device_var.set(selected)
 
     def _on_restart_clicked(self) -> None:
         if self._on_restart is not None:

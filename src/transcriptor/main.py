@@ -46,8 +46,8 @@ from typing import Optional
 
 import numpy as np
 
-from transcriptor.audio import AudioCapture
-from transcriptor.config import AppConfig, load_config
+from transcriptor.audio import AudioCapture, list_input_devices
+from transcriptor.config import AppConfig, AudioConfig, load_config
 from transcriptor.logging_setup import setup_logging
 from transcriptor.server import ServerClient
 from transcriptor.stabilization import Stabilizer, TranscriptSegment
@@ -131,7 +131,16 @@ class Application:
         if ui_factory is not None:
             self._ui: AppUI = ui_factory()
         else:
-            self._ui = AppUI(title="Wedding Transcriptor", event_id=self._config.event_id)
+            try:
+                devices = list_input_devices()
+            except Exception:
+                devices = []
+            self._ui = AppUI(
+                title="Wedding Transcriptor",
+                event_id=self._config.event_id,
+                devices=devices,
+                device_id=self._config.audio.device_id,
+            )
 
         # Pipeline control
         self._stop_event = threading.Event()
@@ -194,6 +203,7 @@ class Application:
     def _wire_ui_callbacks(self) -> None:
         self._ui.set_on_language_change(self._on_language_change)
         self._ui.set_on_restart(self._on_restart_transcriber)
+        self._ui.set_on_device_change(self._on_device_change)
         # Close button → shut down gracefully
         try:
             self._ui._root.protocol("WM_DELETE_WINDOW", self._on_window_close)
@@ -216,6 +226,13 @@ class Application:
             self._transcriber = new_transcriber
         self._ui.update_transcript("Transcriber restarted.")
         log.info("Transcriber restart complete")
+
+    def _on_device_change(self, device_id: str) -> None:
+        log.info("Switching audio device to: %s", device_id)
+        self._audio.stop()
+        self._audio = AudioCapture(AudioConfig(device_id=device_id))
+        self._audio.start()
+        log.info("Audio device switched to: %s", device_id)
 
     # ------------------------------------------------------------------
     # Overlap-commit helpers
