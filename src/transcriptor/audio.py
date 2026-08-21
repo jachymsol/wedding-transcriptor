@@ -124,6 +124,19 @@ class AudioCapture:
             except queue.Empty:
                 continue
 
+    def get_chunk(self, timeout: float = 0.2) -> Optional[np.ndarray]:
+        """Return the next captured chunk, or ``None`` on timeout.
+
+        Unlike :meth:`chunks`, this method does not check the internal
+        stop event — the caller controls the loop lifetime.  Use this
+        when the audio device may be hot-swapped without stopping the
+        consuming loop.
+        """
+        try:
+            return self._queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

@@ -323,9 +323,10 @@ class Application:
         log.info("VAD thread started")
         chunk_count = 0
 
-        for chunk in self._audio.chunks():
-            if self._stop_event.is_set():
-                break
+        while not self._stop_event.is_set():
+            chunk = self._audio.get_chunk(timeout=0.2)
+            if chunk is None:
+                continue
 
             chunk_count += 1
 
