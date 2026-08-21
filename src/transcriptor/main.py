@@ -131,7 +131,7 @@ class Application:
         if ui_factory is not None:
             self._ui: AppUI = ui_factory()
         else:
-            self._ui = AppUI(title="Wedding Transcriptor")
+            self._ui = AppUI(title="Wedding Transcriptor", event_id=self._config.event_id)
 
         # Pipeline control
         self._stop_event = threading.Event()

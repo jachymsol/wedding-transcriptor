@@ -128,11 +128,13 @@ class AppUI:
         self,
         title: str = "Wedding Transcriptor",
         *,
+        event_id: str = "",
         root: Optional[tk.Tk] = None,
     ) -> None:
         self._root: tk.Tk = root if root is not None else tk.Tk()
-        self._root.title(title)
+        self._root.title(f"{title}: {event_id}" if event_id else title)
         self._root.resizable(True, True)
+        self._event_id: str = event_id
 
         # Callbacks registered by the caller
         self._on_language_change: Optional[Callable[[str], None]] = None
