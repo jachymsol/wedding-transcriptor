@@ -181,6 +181,22 @@ class VoiceActivityDetector:
             return self._emit()
         return None
 
+    def reset(self) -> None:
+        """Discard all buffered speech and return to a clean SILENCE state.
+
+        Call this when resuming after a pause so stale audio context does
+        not bleed into the next utterance.
+        """
+        self._state = _State.SILENCE
+        self._speech_buf = []
+        self._consec_speech = 0
+        self._consec_silence = 0
+        self._leftover = np.empty(0, dtype=np.float32)
+        self._pre_roll.clear()
+        self._model.reset_states()
+        self._speech_start_mono = 0.0
+        log.debug("VAD reset")
+
     def speech_segments(
         self, chunks: Iterator[np.ndarray]
     ) -> Iterator[SpeechSegment]:

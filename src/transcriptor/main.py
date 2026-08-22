@@ -148,6 +148,7 @@ class Application:
         self._vad_thread: Optional[threading.Thread] = None
         self._transcription_thread: Optional[threading.Thread] = None
         self._restart_requested: bool = False
+        self._paused: bool = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -212,6 +213,7 @@ class Application:
         self._ui.set_on_restart(self._on_restart_transcriber)
         self._ui.set_on_device_change(self._on_device_change)
         self._ui.set_on_end_event(self._on_end_event)
+        self._ui.set_on_pause_change(self._on_pause_change)
         # Close button → shut down gracefully
         try:
             self._ui._root.protocol("WM_DELETE_WINDOW", self._on_window_close)
@@ -246,6 +248,23 @@ class Application:
         log.info("End Event requested by operator — returning to startup")
         self._restart_requested = True
         self._ui.stop()  # exits mainloop → _shutdown() → run() returns True
+
+    def _on_pause_change(self, paused: bool) -> None:
+        self._paused = paused
+        if not paused:
+            self._server.send_control("start")
+            self._vad.reset()
+            log.info("Transcription resumed — VAD reset")
+        else:
+            self._server.send_control("pause")
+            trailing = self._vad.flush()
+            if trailing is not None:
+                try:
+                    self._speech_queue.put(trailing, timeout=2.0)
+                except queue.Full:
+                    log.warning("Speech queue full on pause — trailing segment dropped")
+            self._skip_overlap_s = 0.0
+            log.info("Transcription paused — VAD flushed")
 
     # ------------------------------------------------------------------
     # Overlap-commit helpers
@@ -341,6 +360,9 @@ class Application:
                     self._server.is_connected,
                     self._queue.count(),
                 )
+
+            if self._paused:
+                continue
 
             # ── VAD ───────────────────────────────────────────────────
             speech_seg = self._vad.process_chunk(chunk)

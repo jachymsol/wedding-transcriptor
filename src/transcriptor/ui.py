@@ -147,6 +147,8 @@ class AppUI:
         self._on_restart: Optional[Callable[[], None]] = None
         self._on_device_change: Optional[Callable[[str], None]] = None
         self._on_end_event: Optional[Callable[[], None]] = None
+        self._on_pause_change: Optional[Callable[[bool], None]] = None
+        self._paused: bool = False
 
         self._build_ui()
 
@@ -197,6 +199,10 @@ class AppUI:
     def set_on_end_event(self, callback: Callable[[], None]) -> None:
         """Register *callback()* invoked when the operator clicks End Event."""
         self._on_end_event = callback
+
+    def set_on_pause_change(self, callback: Callable[[bool], None]) -> None:
+        """Register *callback(paused)* invoked when the operator toggles Pause/Resume."""
+        self._on_pause_change = callback
 
     def set_on_device_change(self, callback: Callable[[str], None]) -> None:
         """Register *callback(device_id)* invoked when the operator selects a device."""
@@ -315,6 +321,13 @@ class AppUI:
         btn_frame = tk.Frame(self._root)
         btn_frame.pack(anchor="e", pady=(0, 4))
 
+        self._pause_btn = tk.Button(
+            btn_frame,
+            text="Pause",
+            command=self._on_pause_clicked,
+        )
+        self._pause_btn.pack(side=tk.LEFT, padx=(0, 6))
+
         self._restart_btn = tk.Button(
             btn_frame,
             text="Restart Transcriber",
@@ -405,6 +418,12 @@ class AppUI:
     def _on_restart_clicked(self) -> None:
         if self._on_restart is not None:
             self._on_restart()
+
+    def _on_pause_clicked(self) -> None:
+        self._paused = not self._paused
+        self._pause_btn.configure(text="Resume" if self._paused else "Pause")
+        if self._on_pause_change is not None:
+            self._on_pause_change(self._paused)
 
     def _on_end_event_clicked(self) -> None:
         if self._on_end_event is not None:
