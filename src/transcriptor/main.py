@@ -214,6 +214,7 @@ class Application:
         self._ui.set_on_device_change(self._on_device_change)
         self._ui.set_on_end_event(self._on_end_event)
         self._ui.set_on_pause_change(self._on_pause_change)
+        self._ui.set_on_section_break(self._on_section_break)
         # Close button → shut down gracefully
         try:
             self._ui._root.protocol("WM_DELETE_WINDOW", self._on_window_close)
@@ -249,12 +250,19 @@ class Application:
         self._restart_requested = True
         self._ui.stop()  # exits mainloop → _shutdown() → run() returns True
 
+    def _on_section_break(self) -> None:
+        language = self._ui.get_language()
+        segment = self._stabilizer.make_segment(language)
+        log.info("Section break sent [%s]", language)
+        self._server.send(segment)
+
     def _on_pause_change(self, paused: bool) -> None:
         self._paused = paused
         if not paused:
             self._server.send_control("start")
             self._vad.reset()
             log.info("Transcription resumed — VAD reset")
+            self._on_section_break()
         else:
             self._server.send_control("pause")
             trailing = self._vad.flush()

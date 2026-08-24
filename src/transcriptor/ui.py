@@ -148,6 +148,7 @@ class AppUI:
         self._on_device_change: Optional[Callable[[str], None]] = None
         self._on_end_event: Optional[Callable[[], None]] = None
         self._on_pause_change: Optional[Callable[[bool], None]] = None
+        self._on_section_break: Optional[Callable[[], None]] = None
         self._paused: bool = False
 
         self._build_ui()
@@ -203,6 +204,10 @@ class AppUI:
     def set_on_pause_change(self, callback: Callable[[bool], None]) -> None:
         """Register *callback(paused)* invoked when the operator toggles Pause/Resume."""
         self._on_pause_change = callback
+
+    def set_on_section_break(self, callback: Callable[[], None]) -> None:
+        """Register *callback()* invoked when the operator clicks Section Break."""
+        self._on_section_break = callback
 
     def set_on_device_change(self, callback: Callable[[str], None]) -> None:
         """Register *callback(device_id)* invoked when the operator selects a device."""
@@ -321,6 +326,13 @@ class AppUI:
         btn_frame = tk.Frame(self._root)
         btn_frame.pack(anchor="e", pady=(0, 4))
 
+        self._section_break_btn = tk.Button(
+            btn_frame,
+            text="Section Break",
+            command=self._on_section_break_clicked,
+        )
+        self._section_break_btn.pack(side=tk.LEFT, padx=(0, 6))
+
         self._pause_btn = tk.Button(
             btn_frame,
             text="Pause",
@@ -422,8 +434,15 @@ class AppUI:
     def _on_pause_clicked(self) -> None:
         self._paused = not self._paused
         self._pause_btn.configure(text="Resume" if self._paused else "Pause")
+        self._section_break_btn.configure(
+            state=tk.DISABLED if self._paused else tk.NORMAL
+        )
         if self._on_pause_change is not None:
             self._on_pause_change(self._paused)
+
+    def _on_section_break_clicked(self) -> None:
+        if self._on_section_break is not None:
+            self._on_section_break()
 
     def _on_end_event_clicked(self) -> None:
         if self._on_end_event is not None:
