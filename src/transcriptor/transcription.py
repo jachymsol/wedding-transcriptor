@@ -81,6 +81,30 @@ class TranscriptResult:
     words: list = field(default_factory=list)  # list[Word]
 
 
+_HALLUCINATION_MIN_OCCURRENCES: int = 5
+_HALLUCINATION_MAX_RATIO: float = 0.80
+
+
+def _is_hallucination(text: str) -> bool:
+    """Return True if *text* looks like a Whisper decoder loop.
+
+    A segment is considered a hallucination when a single word accounts for
+    at least *_HALLUCINATION_MAX_RATIO* of all words **and** appears at least
+    *_HALLUCINATION_MIN_OCCURRENCES* times.  Both conditions must hold so that
+    genuine short utterances (e.g. "yes yes") and mild stuttering are not
+    incorrectly dropped.
+    """
+    words = text.lower().split()
+    if not words:
+        return False
+    counts: dict[str, int] = {}
+    for w in words:
+        counts[w] = counts.get(w, 0) + 1
+    top_word, top_count = max(counts.items(), key=lambda kv: kv[1])
+    ratio = top_count / len(words)
+    return top_count >= _HALLUCINATION_MIN_OCCURRENCES and ratio >= _HALLUCINATION_MAX_RATIO
+
+
 class Transcriber:
     """Transcribes speech audio using a local mlx-whisper model.
 
@@ -179,6 +203,13 @@ class Transcriber:
                 all_words.append(Word(word=w["word"], start=w["start"], end=w["end"]))
 
         text = " ".join(texts)
+
+        if _is_hallucination(text):
+            log.warning(
+                "Dropping hallucinated segment (repeated token): %r", text[:120]
+            )
+            text = ""
+            all_words = []
 
         result = TranscriptResult(
             text=text,
