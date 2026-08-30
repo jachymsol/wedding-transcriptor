@@ -184,32 +184,6 @@ class Stabilizer:
 
         return None
 
-    def make_segment(self, language: str) -> TranscriptSegment:
-        """Create a manual segment (e.g. a section break) using the shared ID counter.
-
-        The segment text is ``"\\n"`` and bypasses the normal stabilization
-        rules.  The ``_next_id`` counter is incremented so that segment IDs
-        remain contiguous with normal transcript segments.
-
-        Parameters
-        ----------
-        language:
-            ISO-639-1 language code to record as ``source_language``.
-        """
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        segment = TranscriptSegment(
-            event_id=self._event_id,
-            segment_id=self._next_id,
-            sequence_number=self._next_id,
-            timestamp=timestamp,
-            source_language=language,
-            text="\n",
-            final=True,
-        )
-        log.info("Segment %d section break [%s]", self._next_id, language)
-        self._next_id += 1
-        return segment
-
     @property
     def pending_text(self) -> str:
         """The current candidate text waiting for stabilization."""

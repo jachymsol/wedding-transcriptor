@@ -177,9 +177,40 @@ class ServerClient:
 
         Thread-safe: may be called from any thread.
         """
-        if self._try_send_now(segment):
+        if self._try_send_raw(segment.to_json()):
+            log.info("Segment %d sent", segment.segment_id)
             return
         self._queue.enqueue(segment)
+
+    def send_section_break(self, break_before_sequence_number: int) -> None:
+        """Send a ``section_break`` control message, queuing it offline if needed.
+
+        Parameters
+        ----------
+        break_before_sequence_number:
+            The sequence number of the next transcript segment that will
+            follow this break.  The receiver uses this to insert a visual
+            section break immediately before that segment.
+
+        Thread-safe: may be called from any thread.
+        """
+        payload = json.dumps({
+            "type": "control",
+            "action": "section_break",
+            "event_id": self._event_id,
+            "break_before_sequence_number": break_before_sequence_number,
+        })
+        if not self._try_send_raw(payload):
+            self._queue.enqueue_raw(payload)
+            log.info(
+                "Section break (before seq %d) queued offline",
+                break_before_sequence_number,
+            )
+        else:
+            log.info(
+                "Section break sent (break_before_sequence_number=%d)",
+                break_before_sequence_number,
+            )
 
     def send_control(self, action: str) -> None:
         """Send a control message over the active WebSocket connection.
@@ -341,20 +372,16 @@ class ServerClient:
     # ------------------------------------------------------------------
 
     def _drain_queue(self) -> None:
-        """Send all queued segments over the active connection.
+        """Send all queued payloads over the active connection.
 
         Stops at the first send failure (connection dropped mid-drain).
         """
-        for row_id, segment in self._queue.peek():
+        for row_id, payload in self._queue.peek_all():
             if self._stop_event.is_set():
                 break
-            if self._try_send_now(segment):
+            if self._try_send_raw(payload):
                 self._queue.delete(row_id)
-                log.info(
-                    "Queued segment %d retransmitted (row %d)",
-                    segment.segment_id,
-                    row_id,
-                )
+                log.info("Queued payload retransmitted (row %d)", row_id)
             else:
                 break  # connection dropped — leave remainder for next cycle
 
@@ -363,13 +390,18 @@ class ServerClient:
     # ------------------------------------------------------------------
 
     def _try_send_now(self, segment: TranscriptSegment) -> bool:
-        """Attempt immediate send over the current active connection.
+        """Attempt immediate send of *segment* over the current active connection.
 
-        Returns ``True`` on success, ``False`` if no connection or if the
-        send fails (in which case the WS state is cleared).
+        Returns ``True`` on success, ``False`` otherwise.
         """
-        payload = segment.to_json()
+        return self._try_send_raw(segment.to_json())
 
+    def _try_send_raw(self, payload: str) -> bool:
+        """Attempt immediate send of a raw JSON *payload* string.
+
+        Returns ``True`` on success, ``False`` if no connection is active or
+        if the send fails (in which case the WS state is cleared).
+        """
         with self._state_lock:
             state = self._state
             ws = self._ws_conn
@@ -377,7 +409,7 @@ class ServerClient:
         if state == ConnectionState.CONNECTED_WS and ws is not None:
             try:
                 ws.send(payload)
-                log.info("Segment %d sent via WebSocket", segment.segment_id)
+                log.debug("Payload sent via WebSocket (%d bytes)", len(payload))
                 return True
             except Exception as exc:
                 log.warning("WebSocket send failed: %s", exc)
@@ -388,7 +420,7 @@ class ServerClient:
         elif state == ConnectionState.CONNECTED_HTTP:
             ok = self._http_poster(self._url_http, payload.encode())
             if ok:
-                log.info("Segment %d sent via HTTP POST", segment.segment_id)
+                log.debug("Payload sent via HTTP POST (%d bytes)", len(payload))
             return ok
 
         return False

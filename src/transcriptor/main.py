@@ -251,10 +251,9 @@ class Application:
         self._ui.stop()  # exits mainloop → _shutdown() → run() returns True
 
     def _on_section_break(self) -> None:
-        language = self._ui.get_language()
-        segment = self._stabilizer.make_segment(language)
-        log.info("Section break sent [%s]", language)
-        self._server.send(segment)
+        next_id = self._stabilizer.next_segment_id
+        log.info("Section break — break_before_sequence_number=%d", next_id)
+        self._server.send_section_break(next_id)
 
     def _on_pause_change(self, paused: bool) -> None:
         self._paused = paused
