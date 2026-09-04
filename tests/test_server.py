@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+import urllib.error
 from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock, call, patch
@@ -20,6 +21,7 @@ from transcriptor.server import (
     ConnectionState,
     ServerClient,
     _ws_url_to_http,
+    fetch_last_segment_id,
 )
 from transcriptor.stabilization import TranscriptSegment
 from transcriptor.storage import SegmentQueue
@@ -454,3 +456,125 @@ class TestRetry:
         client.stop()
 
         assert len(connections) >= 2
+
+
+# ---------------------------------------------------------------------------
+# fetch_last_segment_id — resume support (FR-007 extension)
+# ---------------------------------------------------------------------------
+
+class _FakeHttpResponse:
+    """Fake context-manager response object mimicking urllib's response."""
+
+    def __init__(self, status: int, body: bytes = b""):
+        self.status = status
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        return False
+
+
+class TestFetchLastSegmentId:
+    @staticmethod
+    def _event_body(segment_count: int = 0, **overrides) -> bytes:
+        """Build a realistic GET /admin/events/:event_id response body."""
+        import json as _json
+        payload = {
+            "id": "wedding-2027",
+            "status": "live",
+            "createdAt": "2026-09-04T12:00:00.000Z",
+            "startedAt": "2026-09-04T12:00:00.000Z",
+            "endedAt": None,
+            "segmentCount": segment_count,
+            "translationCount": segment_count * 2,
+        }
+        payload.update(overrides)
+        return _json.dumps(payload).encode("utf-8")
+
+    def test_returns_last_segment_id_on_success(self):
+        opener = lambda req: _FakeHttpResponse(200, self._event_body(42))
+        config = _make_config()
+        assert fetch_last_segment_id(config, opener=opener) == 42
+
+    def test_missing_key_in_body_defaults_to_zero(self):
+        opener = lambda req: _FakeHttpResponse(200, b'{"id": "wedding-2027"}')
+        config = _make_config()
+        assert fetch_last_segment_id(config, opener=opener) == 0
+
+    def test_empty_body_defaults_to_zero(self):
+        opener = lambda req: _FakeHttpResponse(200, b"")
+        config = _make_config()
+        assert fetch_last_segment_id(config, opener=opener) == 0
+
+    def test_404_returns_zero(self):
+        def opener(req):
+            raise urllib.error.HTTPError(
+                req.full_url, 404, "Not Found", {}, None
+            )
+
+        config = _make_config()
+        assert fetch_last_segment_id(config, opener=opener) == 0
+
+    def test_other_http_error_returns_zero(self):
+        def opener(req):
+            raise urllib.error.HTTPError(req.full_url, 500, "Server Error", {}, None)
+
+        config = _make_config()
+        assert fetch_last_segment_id(config, opener=opener) == 0
+
+    def test_non_2xx_status_returns_zero(self):
+        opener = lambda req: _FakeHttpResponse(301, self._event_body(9))
+        config = _make_config()
+        assert fetch_last_segment_id(config, opener=opener) == 0
+
+    def test_connection_error_returns_zero(self):
+        def opener(req):
+            raise OSError("connection refused")
+
+        config = _make_config()
+        assert fetch_last_segment_id(config, opener=opener) == 0
+
+    def test_url_targets_admin_events_endpoint(self):
+        seen_urls = []
+
+        def opener(req):
+            seen_urls.append(req.full_url)
+            return _FakeHttpResponse(200, self._event_body(0))
+
+        config = AppConfig(
+            event_id="wedding-2027",
+            server=ServerConfig(websocket_url="wss://host:8443/ws"),
+        )
+        fetch_last_segment_id(config, opener=opener)
+        assert seen_urls == ["https://host:8443/admin/events/wedding-2027"]
+
+    def test_authorization_header_added_when_api_key_set(self):
+        seen_headers = []
+
+        def opener(req):
+            seen_headers.append(dict(req.header_items()))
+            return _FakeHttpResponse(200, self._event_body(0))
+
+        config = AppConfig(
+            api_key="secret-key",
+            server=ServerConfig(websocket_url="wss://example.com/ws"),
+        )
+        fetch_last_segment_id(config, opener=opener)
+        assert seen_headers[0].get("Authorization") == "Bearer secret-key"
+
+    def test_no_authorization_header_when_api_key_empty(self):
+        seen_headers = []
+
+        def opener(req):
+            seen_headers.append(dict(req.header_items()))
+            return _FakeHttpResponse(200, self._event_body(0))
+
+        config = _make_config()
+        config = config.model_copy(update={"api_key": ""})
+        fetch_last_segment_id(config, opener=opener)
+        assert "Authorization" not in seen_headers[0]

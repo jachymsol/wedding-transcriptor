@@ -200,6 +200,43 @@ The system shall transmit finalized transcript segments to the translation serve
 
 * HTTPS POST
 
+### Admin API
+
+The client uses a small REST admin API on the same host as the WebSocket
+server (path derived by rewriting `wss://`/`ws://` to `https://`/`http://`
+and stripping any path suffix):
+
+* `POST /admin/events/{event_id}` — registers an event. Used by the
+  "Register" button in the startup dialog.
+* `GET /admin/events/{event_id}` — returns event metadata, used by the
+  client to resume segment numbering after a restart instead of colliding
+  with segments from a previous run:
+
+  ```json
+  {
+    "id": "wedding-2027",
+    "status": "waiting" | "live" | "paused" | "ended",
+    "createdAt": "2026-09-04T12:00:00.000Z",
+    "startedAt": "2026-09-04T12:00:00.000Z" | null,
+    "endedAt": "2026-09-04T12:00:00.000Z" | null,
+    "segmentCount": 42,
+    "translationCount": 84
+  }
+  ```
+
+  The client only reads `segmentCount` (segment_id/sequence_number values
+  are assigned sequentially with no gaps, so the segment count equals the
+  highest segment_id sent so far) and uses `segmentCount + 1` as the
+  starting segment_id.
+
+  * `404` (event never registered/started) is treated the same as
+    `segmentCount: 0` — numbering starts at `1`.
+  * Any other error (unreachable server, timeout, non-2xx status) also
+    falls back to starting at `1`, logged as a warning — the client does
+    not block startup waiting for this to succeed.
+  * Both endpoints accept `Authorization: Bearer {api_key}` when an API
+    key is configured.
+
 ---
 
 ## FR-008 Offline Operation

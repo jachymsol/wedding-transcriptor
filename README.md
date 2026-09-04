@@ -195,9 +195,13 @@ Each finalized segment is sent as JSON:
 }
 ```
 
-`segment_id` and `sequence_number` are monotonically increasing integers that
-reset when the application restarts. `final` is always `true` in the current
-version.
+`segment_id` and `sequence_number` are monotonically increasing integers. On
+startup the client calls `GET /admin/events/{event_id}` to fetch the event's
+`segmentCount` and resumes numbering from `segmentCount + 1`, so restarting
+the app mid-event does not collide with previously sent segments. If the
+event is new (server responds `404`) or the lookup fails for any reason
+(server unreachable, timeout, error), numbering falls back to starting at
+`1`. `final` is always `true` in the current version.
 
 ---
 

@@ -49,7 +49,7 @@ import numpy as np
 from transcriptor.audio import AudioCapture, list_input_devices
 from transcriptor.config import AppConfig, AudioConfig, load_config
 from transcriptor.logging_setup import setup_logging
-from transcriptor.server import ServerClient
+from transcriptor.server import ServerClient, fetch_last_segment_id
 from transcriptor.stabilization import Stabilizer, TranscriptSegment
 from transcriptor.storage import SegmentQueue
 from transcriptor.transcription import Transcriber, TranscriptResult
@@ -121,8 +121,17 @@ class Application:
         self._transcriber: Transcriber = Transcriber(self._config.transcription)
         self._transcriber_lock = threading.Lock()
 
-        # Stabilizer
-        self._stabilizer = Stabilizer(self._config)
+        # Stabilizer — resume numbering from the server's last segment_id (if
+        # any) so restarting the app mid-event doesn't collide with segments
+        # already sent for this event_id in a previous run.
+        last_segment_id = fetch_last_segment_id(self._config)
+        log.info(
+            "Starting segment numbering at %d for event '%s'",
+            last_segment_id + 1, self._config.event_id,
+        )
+        self._stabilizer = Stabilizer(
+            self._config, start_segment_id=last_segment_id + 1
+        )
 
         # Server client
         self._server = ServerClient(self._config, self._queue)

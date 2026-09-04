@@ -40,9 +40,11 @@ import threading
 import urllib.error
 import urllib.request
 from enum import Enum, auto
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from transcriptor.config import AppConfig
+from transcriptor.http_utils import admin_url
+from transcriptor.http_utils import ws_url_to_http as _ws_url_to_http
 from transcriptor.stabilization import TranscriptSegment
 from transcriptor.storage import SegmentQueue
 
@@ -92,13 +94,87 @@ def _default_http_poster(url: str, payload: bytes) -> bool:
         return False
 
 
-def _ws_url_to_http(ws_url: str) -> str:
-    """Rewrite ``wss://`` → ``https://`` or ``ws://`` → ``http://``."""
-    if ws_url.startswith("wss://"):
-        return "https://" + ws_url[6:]
-    if ws_url.startswith("ws://"):
-        return "http://" + ws_url[5:]
-    return ws_url  # already HTTP or unknown scheme
+# ---------------------------------------------------------------------------
+# Resume support — query the server for the last segment_id of an event
+# ---------------------------------------------------------------------------
+
+def fetch_last_segment_id(
+    config: AppConfig,
+    *,
+    timeout: float = 5.0,
+    opener: Optional[Callable[[urllib.request.Request], Any]] = None,
+) -> int:
+    """Return the highest ``segment_id`` already sent for ``config.event_id``.
+
+    Calls ``GET /admin/events/{event_id}`` on the translation server so a
+    restarted client can resume numbering instead of starting over at 1
+    (which would collide with segments from a previous run of the app for
+    the same event).
+
+    The endpoint's ``200`` response body looks like::
+
+        {
+          "id": "wedding-2027",
+          "status": "waiting" | "live" | "paused" | "ended",
+          "createdAt": "...", "startedAt": "...", "endedAt": "...",
+          "segmentCount": 42,
+          "translationCount": 84
+        }
+
+    Only ``segmentCount`` is used here (segment_id/sequence_number values
+    are assigned sequentially with no gaps, so the count of segments
+    persisted for the event equals the highest segment_id sent so far).
+
+    Returns ``0`` (meaning "no prior segments") in every case where a
+    resumable number can't be determined:
+
+    * The server responds ``404`` (event has never been registered/started)
+      — logged at INFO, this is an expected case for a brand-new event.
+    * The server is unreachable, times out, or returns a non-2xx status
+      other than 404, or an unparseable body — logged at WARNING, since this
+      means we *can't tell* whether prior segments exist.
+
+    Callers should use ``fetch_last_segment_id(config) + 1`` as the starting
+    ``segment_id`` for a new :class:`~transcriptor.stabilization.Stabilizer`.
+    """
+    url = admin_url(config.server.websocket_url, config.event_id)
+    req = urllib.request.Request(url, method="GET")
+    if config.api_key:
+        req.add_header("Authorization", f"Bearer {config.api_key}")
+
+    opener = opener or (lambda r: urllib.request.urlopen(r, timeout=timeout))
+
+    try:
+        with opener(req) as resp:
+            if not (200 <= resp.status < 300):
+                log.warning(
+                    "Unexpected status %d fetching last segment id for '%s' — "
+                    "starting numbering at 1",
+                    resp.status, config.event_id,
+                )
+                return 0
+            raw = resp.read()
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+            return int(body.get("segmentCount", 0) or 0)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            log.info(
+                "Event '%s' not found on server — starting numbering at 1",
+                config.event_id,
+            )
+        else:
+            log.warning(
+                "Failed to fetch last segment id for '%s' (HTTP %d) — "
+                "starting numbering at 1",
+                config.event_id, exc.code,
+            )
+        return 0
+    except Exception as exc:
+        log.warning(
+            "Failed to fetch last segment id for '%s' (%s) — starting numbering at 1",
+            config.event_id, exc,
+        )
+        return 0
 
 
 # ---------------------------------------------------------------------------

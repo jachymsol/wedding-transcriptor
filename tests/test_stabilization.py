@@ -55,11 +55,12 @@ def _make_stabilizer(
     silence_ms: int = 700,
     stable_ms: int = 2000,
     clock: FakeClock | None = None,
+    start_segment_id: int = 1,
 ) -> tuple[Stabilizer, FakeClock]:
     if clock is None:
         clock = FakeClock()
     config = _make_config(event_id=event_id, silence_ms=silence_ms, stable_ms=stable_ms)
-    return Stabilizer(config, clock=clock), clock
+    return Stabilizer(config, clock=clock, start_segment_id=start_segment_id), clock
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,26 @@ class TestStabilizerInit:
         result = _make_result("Hello")
         seg = s.update(result, is_final=True)
         assert seg.event_id == "my-wedding"
+
+    def test_start_segment_id_defaults_to_one(self):
+        s, _ = _make_stabilizer()
+        assert s.next_segment_id == 1
+
+    def test_start_segment_id_can_be_overridden(self):
+        s, _ = _make_stabilizer(start_segment_id=43)
+        assert s.next_segment_id == 43
+
+    def test_first_emitted_segment_uses_start_segment_id(self):
+        s, _ = _make_stabilizer(start_segment_id=43)
+        seg = s.update(_make_result("Hello"), is_final=True)
+        assert seg.segment_id == 43
+        assert seg.sequence_number == 43
+
+    def test_subsequent_segments_increment_from_start_segment_id(self):
+        s, _ = _make_stabilizer(start_segment_id=43)
+        s.update(_make_result("Hello"), is_final=True)
+        seg2 = s.update(_make_result("World"), is_final=True)
+        assert seg2.segment_id == 44
 
 
 # ---------------------------------------------------------------------------

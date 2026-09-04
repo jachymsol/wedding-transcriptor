@@ -48,10 +48,10 @@ import urllib.request
 from pathlib import Path
 from tkinter import ttk
 from typing import Optional
-from urllib.parse import urlparse, urlunparse
 
 import yaml
 
+from transcriptor.http_utils import admin_url
 from transcriptor.config import (
     AppConfig,
     AudioConfig,
@@ -385,12 +385,7 @@ class StartupDialog:
             self._server_url_var.get().strip()
             or self._base_config.server.websocket_url
         )
-        http_base = self._ws_url_to_http(ws_url).rstrip("/")
-        # Strip any path suffix the websocket URL may carry (e.g. "/ws")
-        # so we post to the server root + /admin/events/:event_id.
-        parsed = urlparse(http_base)
-        base_no_path = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
-        url = f"{base_no_path}/admin/events/{event_id}"
+        url = admin_url(ws_url, event_id)
 
         log.info("Registering event: POST %s", url)
         try:
@@ -414,15 +409,6 @@ class StartupDialog:
         self._register_status_label.configure(fg=colour)
         self._register_status_label.grid()
         log.info("Register event result: %s", msg)
-
-    @staticmethod
-    def _ws_url_to_http(ws_url: str) -> str:
-        """Rewrite ``wss://`` → ``https://`` or ``ws://`` → ``http://``."""
-        if ws_url.startswith("wss://"):
-            return "https://" + ws_url[6:]
-        if ws_url.startswith("ws://"):
-            return "http://" + ws_url[5:]
-        return ws_url  # already HTTP or unknown scheme
 
     def _on_start(self) -> None:
         event_id = self._event_id_var.get().strip() or self._base_config.event_id

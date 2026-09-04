@@ -110,6 +110,12 @@ class Stabilizer:
         Callable returning the current time in seconds (defaults to
         :func:`time.monotonic`).  Inject a fake clock in tests to make
         time-based assertions deterministic.
+    start_segment_id:
+        The ``segment_id``/``sequence_number`` to assign to the first
+        emitted segment. Defaults to ``1`` (a new event). Pass
+        ``fetch_last_segment_id(config) + 1`` when resuming an event that
+        already has segments on the server, so numbering continues instead
+        of colliding with a previous run.
 
     Usage::
 
@@ -124,12 +130,14 @@ class Stabilizer:
         self,
         config: AppConfig,
         clock: Callable[[], float] = time.monotonic,
+        *,
+        start_segment_id: int = 1,
     ) -> None:
         self._event_id: str = config.event_id
         self._silence_ms: int = config.stabilization.silence_ms   # 700 ms default
         self._stable_ms: int = config.stabilization.stable_ms     # 2000 ms default
         self._clock = clock
-        self._next_id: int = 1
+        self._next_id: int = start_segment_id
 
         # Pending (not-yet-emitted) state
         self._pending_text: str = ""
