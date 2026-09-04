@@ -36,6 +36,7 @@ from transcriptor.transcription import (
     TranscriptResult,
     Word,
     _SAMPLE_RATE,
+    _find_loop_start,
     _resolve_mlx_repo,
 )
 
@@ -335,3 +336,81 @@ class TestWordCollection:
         t, _ = _make_transcriber([])
         result = t.transcribe(AUDIO_1S)
         assert result.words == []
+
+
+# ---------------------------------------------------------------------------
+# transcribe() — hallucination loop truncation (end-to-end)
+# ---------------------------------------------------------------------------
+
+class TestHallucinationTruncation:
+    def _make_model_with_words(self, text: str, words: list) -> MagicMock:
+        seg = _make_segment(text, words=words)
+        model = MagicMock()
+        model.return_value = {"text": text, "language": "en", "segments": [seg]}
+        return model
+
+    def test_bigram_loop_truncated_keeping_good_prefix(self):
+        good = ["Ja", "jsem", "v", "singingu"]
+        loop = (["H", "instagramuawat"] * 5) + ["H"] * 4
+        all_tokens = good + loop
+        mock_words = [_make_word(f" {w}", i * 0.1, i * 0.1 + 0.09) for i, w in enumerate(all_tokens)]
+        text = " ".join(all_tokens)
+        model = self._make_model_with_words(text, mock_words)
+        config = TranscriptionConfig(model="medium", language="cs")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == "Ja jsem v singingu"
+        assert len(result.words) == len(good)
+        assert [w.word.strip() for w in result.words] == good
+
+    def test_normal_sentence_unaffected(self):
+        words_list = "Ja jsem velmi rada ze jsme se dnes sesli".split()
+        mock_words = [_make_word(f" {w}", i * 0.1, i * 0.1 + 0.09) for i, w in enumerate(words_list)]
+        text = " ".join(words_list)
+        model = self._make_model_with_words(text, mock_words)
+        config = TranscriptionConfig(model="medium", language="cs")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == text
+        assert len(result.words) == len(words_list)
+
+
+# ---------------------------------------------------------------------------
+# _find_loop_start — periodicity-based hallucination loop detection
+# ---------------------------------------------------------------------------
+
+class TestFindLoopStart:
+    def test_no_tokens_returns_none(self):
+        assert _find_loop_start([]) is None
+
+    def test_short_normal_sentence_not_flagged(self):
+        tokens = "ja jsem velmi rada ze jsme se dnes sesli".split()
+        assert _find_loop_start(tokens) is None
+
+    def test_unigram_loop_from_start_flagged(self):
+        tokens = ["the"] * 8
+        assert _find_loop_start(tokens) == 0
+
+    def test_unigram_loop_after_good_prefix(self):
+        tokens = "hello there my friend".split() + ["h"] * 8
+        assert _find_loop_start(tokens) == 4
+
+    def test_bigram_alternating_loop_matches_reported_case(self):
+        prefix = "ja jsem v singingu".split()
+        loop = (["h", "instagramuawat"] * 5) + ["h"] * 4
+        tokens = prefix + loop
+        assert _find_loop_start(tokens) == len(prefix)
+
+    def test_trigram_loop_flagged(self):
+        prefix = ["dobry", "den", "vsem"]
+        loop = ["a", "b", "c"] * 4
+        tokens = prefix + loop
+        assert _find_loop_start(tokens) == len(prefix)
+
+    def test_short_legitimate_repeat_not_flagged(self):
+        tokens = "jo jo jo dobre tak zacneme".split()
+        assert _find_loop_start(tokens) is None
+
+    def test_two_occurrences_of_a_word_not_flagged(self):
+        tokens = "ja ja vim ze to bylo tezke".split()
+        assert _find_loop_start(tokens) is None

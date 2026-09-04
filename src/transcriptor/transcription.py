@@ -81,28 +81,58 @@ class TranscriptResult:
     words: list = field(default_factory=list)  # list[Word]
 
 
-_HALLUCINATION_MIN_OCCURRENCES: int = 5
-_HALLUCINATION_MAX_RATIO: float = 0.80
+_HALLUCINATION_MAX_PERIOD: int = 4
+_HALLUCINATION_MIN_RUN_TOKENS: int = 6
+_HALLUCINATION_MIN_COVERAGE: float = 0.65
 
 
-def _is_hallucination(text: str) -> bool:
-    """Return True if *text* looks like a Whisper decoder loop.
+def _find_loop_start(tokens: list[str]) -> int | None:
+    """Return the index where a repeating (hallucinated) loop begins, or None.
 
-    A segment is considered a hallucination when a single word accounts for
-    at least *_HALLUCINATION_MAX_RATIO* of all words **and** appears at least
-    *_HALLUCINATION_MIN_OCCURRENCES* times.  Both conditions must hold so that
-    genuine short utterances (e.g. "yes yes") and mild stuttering are not
-    incorrectly dropped.
+    Detects Whisper decoder loops of period 1..*_HALLUCINATION_MAX_PERIOD*
+    (e.g. "the the the the", or "H instagramuawat H instagramuawat …" which
+    is a period-2 loop). For each period *p*, a token at index *i* is
+    considered a "repeat" if it equals the token *p* positions earlier. The
+    longest run of consecutive repeats (for any period) is found; if that
+    run covers at least *_HALLUCINATION_MIN_COVERAGE* of the tokens from its
+    start to the end of the segment, and spans at least
+    *_HALLUCINATION_MIN_RUN_TOKENS* tokens (including the seed span of
+    length *p*), the segment is flagged as looping from that point onward.
+
+    When multiple periods qualify, the earliest starting index across all of
+    them is returned, so the segment is truncated at the true loop onset
+    rather than at the first period checked.
+
+    Returns the token index to truncate at (keep ``tokens[:index]``), or
+    ``None`` if no loop is detected.
     """
-    words = text.lower().split()
-    if not words:
-        return False
-    counts: dict[str, int] = {}
-    for w in words:
-        counts[w] = counts.get(w, 0) + 1
-    top_word, top_count = max(counts.items(), key=lambda kv: kv[1])
-    ratio = top_count / len(words)
-    return top_count >= _HALLUCINATION_MIN_OCCURRENCES and ratio >= _HALLUCINATION_MAX_RATIO
+    n = len(tokens)
+    if n == 0:
+        return None
+
+    best_start: int | None = None
+
+    for p in range(1, _HALLUCINATION_MAX_PERIOD + 1):
+        if n <= p:
+            continue
+        # is_repeat[i] is True when tokens[i] == tokens[i-p], for i in [p, n).
+        run_start: int | None = None
+        for i in range(p, n + 1):
+            is_repeat = i < n and tokens[i] == tokens[i - p]
+            if is_repeat:
+                if run_start is None:
+                    run_start = i - p  # seed of the run starts p tokens back
+            else:
+                if run_start is not None:
+                    loop_start = run_start
+                    run_tokens = i - loop_start
+                    coverage = run_tokens / (n - loop_start)
+                    if run_tokens >= _HALLUCINATION_MIN_RUN_TOKENS and coverage >= _HALLUCINATION_MIN_COVERAGE:
+                        if best_start is None or loop_start < best_start:
+                            best_start = loop_start
+                    run_start = None
+
+    return best_start
 
 
 class Transcriber:
@@ -204,12 +234,16 @@ class Transcriber:
 
         text = " ".join(texts)
 
-        if _is_hallucination(text):
+        tokens = [w.word.strip().lower() for w in all_words]
+        loop_start = _find_loop_start(tokens)
+        if loop_start is not None:
+            dropped_preview = " ".join(tokens[loop_start:loop_start + 10])
             log.warning(
-                "Dropping hallucinated segment (repeated token): %r", text[:120]
+                "Truncating hallucinated loop at word %d/%d: %r…",
+                loop_start, len(tokens), dropped_preview,
             )
-            text = ""
-            all_words = []
+            all_words = all_words[:loop_start]
+            text = " ".join(w.word.strip() for w in all_words)
 
         result = TranscriptResult(
             text=text,
