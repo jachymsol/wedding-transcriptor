@@ -217,6 +217,28 @@ class VoiceActivityDetector:
         """Current VAD state as a string (``"SILENCE"`` or ``"SPEECH"``)."""
         return self._state.name
 
+    def set_limits(self, max_speech_ms: int, overlap_ms: int) -> None:
+        """Reconfigure ``max_speech_ms``/``overlap_ms`` limits at runtime.
+
+        Safe to call while the VAD is mid-stream (e.g. from an operator
+        language switch): the new limits take effect from the next
+        partial-emit check onward. If called while a segment is already in
+        progress, the new ``overlap_ms`` is only applied at the *next*
+        partial emit (it changes how many trailing windows are retained at
+        that point) — the segment currently accumulating is unaffected
+        until then.
+        """
+        self._max_speech_samples = (
+            max_speech_ms * _SAMPLE_RATE // 1000 if max_speech_ms > 0 else 0
+        )
+        self._overlap_windows = max(
+            0, overlap_ms * _SAMPLE_RATE // 1000 // _VAD_WINDOW
+        )
+        log.info(
+            "VAD limits updated: max_speech_ms=%d overlap_ms=%d",
+            max_speech_ms, overlap_ms,
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

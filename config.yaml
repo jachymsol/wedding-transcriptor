@@ -19,3 +19,8 @@ vad:
   max_speech_ms: 2000
   end_overlap_ms: 300
   start_overlap_ms: 600
+  overrides:
+    cs:
+      max_speech_ms: 6000
+      end_overlap_ms: 800
+      start_overlap_ms: 1500

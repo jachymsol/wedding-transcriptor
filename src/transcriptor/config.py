@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Tuple, Type
+from typing import Optional, Tuple, Type
 
 from pydantic import BaseModel
 from pydantic_settings import (
@@ -37,6 +37,18 @@ class StabilizationConfig(BaseModel):
     stable_ms: int = 2000
 
 
+class VADOverride(BaseModel):
+    """Per-language overrides for :class:`VADConfig` timing fields.
+
+    Any field left ``None`` falls back to the corresponding global
+    ``VADConfig`` value (see :meth:`VADConfig.effective`).
+    """
+
+    max_speech_ms: Optional[int] = None
+    end_overlap_ms: Optional[int] = None
+    start_overlap_ms: Optional[int] = None
+
+
 class VADConfig(BaseModel):
     #: Emit a partial segment and reset the buffer when speech exceeds this
     #: duration (milliseconds).  Set to 0 to disable — VAD will accumulate
@@ -52,6 +64,25 @@ class VADConfig(BaseModel):
     #: ``end_overlap_ms`` region and benefit from more right-side audio
     #: than they had in the previous window.
     start_overlap_ms: int = 2_000 # 2 s
+    #: Per-language overrides, keyed by ISO-639-1 code (e.g. ``"cs"``).
+    #: Languages with sparser Whisper training data (e.g. Czech) often
+    #: benefit from longer segments / more overlap context; this lets
+    #: those languages use different timings without changing the global
+    #: defaults used by every other language.
+    overrides: dict[str, VADOverride] = {}
+
+    def effective(self, language: str) -> Tuple[int, int, int]:
+        """Return ``(max_speech_ms, end_overlap_ms, start_overlap_ms)`` for *language*.
+
+        Falls back to the global fields for any override field left unset
+        (or when no override is defined for *language* at all).
+        """
+        o = self.overrides.get(language)
+        return (
+            o.max_speech_ms if o and o.max_speech_ms is not None else self.max_speech_ms,
+            o.end_overlap_ms if o and o.end_overlap_ms is not None else self.end_overlap_ms,
+            o.start_overlap_ms if o and o.start_overlap_ms is not None else self.start_overlap_ms,
+        )
 
 
 class AppConfig(BaseSettings):

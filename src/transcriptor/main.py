@@ -96,23 +96,27 @@ class Application:
         # Audio capture
         self._audio = AudioCapture(self._config.audio)
 
-        # VAD (loads Silero on construction)
-        _total_overlap_ms = (
-            self._config.vad.end_overlap_ms + self._config.vad.start_overlap_ms
+        # VAD (loads Silero on construction).  Timings are resolved per the
+        # initial transcription language so per-language overrides (e.g. more
+        # context for languages Whisper handles less confidently) apply from
+        # the start, not just after the first language switch.
+        _max_speech_ms, _end_overlap_ms, _start_overlap_ms = self._config.vad.effective(
+            self._config.transcription.language
         )
         self._vad = VoiceActivityDetector(
-            max_speech_ms=self._config.vad.max_speech_ms,
-            overlap_ms=_total_overlap_ms,
+            max_speech_ms=_max_speech_ms,
+            overlap_ms=_end_overlap_ms + _start_overlap_ms,
         )
         # start_overlap_ms: words at the START of the next window that were
         # already committed by the current window.  They are skipped in the
         # next window to avoid double-sending.
         # end_overlap_ms: the LAST end_overlap_ms of each partial window are
         # NOT committed from that window; instead they are committed by the
-        # *next* window, where they benefit from more right-side audio context.
+        # *next* window, where they benefit from more right-side audio
+        # context.
         # The total VAD buffer = start + end, but each half plays a different role.
-        self._end_overlap_s: float = self._config.vad.end_overlap_ms / 1000.0
-        self._start_overlap_s: float = self._config.vad.start_overlap_ms / 1000.0
+        self._end_overlap_s: float = _end_overlap_ms / 1000.0
+        self._start_overlap_s: float = _start_overlap_ms / 1000.0
         # Seconds to skip at the START of the next segment (= start_overlap_s).
         # Set after every partial emit; reset to 0.0 after each segment.
         self._skip_overlap_s: float = 0.0
@@ -237,6 +241,10 @@ class Application:
     def _on_language_change(self, code: str) -> None:
         with self._transcriber_lock:
             self._transcriber.set_language(code)
+        max_speech_ms, end_overlap_ms, start_overlap_ms = self._config.vad.effective(code)
+        self._vad.set_limits(max_speech_ms, end_overlap_ms + start_overlap_ms)
+        self._end_overlap_s = end_overlap_ms / 1000.0
+        self._start_overlap_s = start_overlap_ms / 1000.0
         log.info("Language set to: %s", code)
 
     def _on_restart_transcriber(self) -> None:

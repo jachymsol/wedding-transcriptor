@@ -539,6 +539,52 @@ class TestMaxSpeechMs:
 
 
 # ---------------------------------------------------------------------------
+# set_limits — runtime reconfiguration (e.g. per-language switch)
+# ---------------------------------------------------------------------------
+
+class TestSetLimits:
+    def test_updates_max_speech_samples(self):
+        vad, _ = make_vad(max_speech_ms=2000, overlap_ms=0)
+        new_max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE
+        vad.set_limits(new_max_ms, 0)
+        assert vad._max_speech_samples == new_max_ms * _SAMPLE_RATE // 1000
+
+    def test_updates_overlap_windows(self):
+        vad, _ = make_vad(max_speech_ms=2000, overlap_ms=0)
+        overlap_ms = 2 * _VAD_WINDOW * 1000 // _SAMPLE_RATE
+        vad.set_limits(2000, overlap_ms)
+        assert vad._overlap_windows == 2
+
+    def test_max_speech_ms_zero_disables_partial_emission(self):
+        vad, _ = make_vad(max_speech_ms=2000, overlap_ms=0)
+        vad.set_limits(0, 0)
+        assert vad._max_speech_samples == 0
+
+    def test_new_limits_apply_to_next_partial_emit(self):
+        """Calling set_limits mid-stream changes when the next partial fires."""
+        max_ms = 4 * _VAD_WINDOW * 1000 // _SAMPLE_RATE
+        vad, model = _make_vad_with_max(max_ms, overlap_ms=0)
+
+        # Raise the limit before any speech starts — partial should NOT fire
+        # at the old (4-window) threshold anymore.
+        higher_max_ms = 20 * _VAD_WINDOW * 1000 // _SAMPLE_RATE
+        vad.set_limits(higher_max_ms, 0)
+
+        model.return_value.item.return_value = 1.0
+        vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))  # enter SPEECH
+
+        seg = None
+        for _ in range(10):  # well within the old 4-window limit
+            result = vad.process_chunk(np.zeros(_VAD_WINDOW, dtype=np.float32))
+            if result is not None:
+                seg = result
+                break
+
+        assert seg is None
+        assert vad.state == "SPEECH"
+
+
+# ---------------------------------------------------------------------------
 # Latency timestamps — speech_start_mono / emit_mono
 # ---------------------------------------------------------------------------
 

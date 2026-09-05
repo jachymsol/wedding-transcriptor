@@ -13,6 +13,7 @@ from transcriptor.config import (
     StabilizationConfig,
     TranscriptionConfig,
     VADConfig,
+    VADOverride,
     load_config,
 )
 
@@ -49,12 +50,54 @@ class TestDefaults:
     def test_vad_start_overlap_ms(self):
         assert VADConfig().start_overlap_ms == 2_000
 
+    def test_vad_overrides_default_empty(self):
+        assert VADConfig().overrides == {}
+
     def test_app_event_id(self):
         # Default when no YAML or env override is present
         # (may be overridden by the project's own config.yaml — that's fine
         # for this test, which only checks the model field exists)
         cfg = AppConfig(event_id="test-event")
         assert cfg.event_id == "test-event"
+
+
+# ---------------------------------------------------------------------------
+# VADConfig.effective() — per-language overrides
+# ---------------------------------------------------------------------------
+
+class TestVADEffective:
+    def test_no_override_returns_global_values(self):
+        cfg = VADConfig(max_speech_ms=2000, end_overlap_ms=300, start_overlap_ms=600)
+        assert cfg.effective("en") == (2000, 300, 600)
+
+    def test_full_override_replaces_all_fields(self):
+        cfg = VADConfig(
+            max_speech_ms=2000,
+            end_overlap_ms=300,
+            start_overlap_ms=600,
+            overrides={"cs": VADOverride(max_speech_ms=6000, end_overlap_ms=800, start_overlap_ms=1500)},
+        )
+        assert cfg.effective("cs") == (6000, 800, 1500)
+        # Other languages are unaffected by the "cs" override.
+        assert cfg.effective("en") == (2000, 300, 600)
+
+    def test_partial_override_falls_back_to_global_for_unset_fields(self):
+        cfg = VADConfig(
+            max_speech_ms=2000,
+            end_overlap_ms=300,
+            start_overlap_ms=600,
+            overrides={"cs": VADOverride(max_speech_ms=6000)},
+        )
+        assert cfg.effective("cs") == (6000, 300, 600)
+
+    def test_overrides_parsed_from_yaml_dict(self):
+        cfg = VADConfig(**{
+            "max_speech_ms": 2000,
+            "end_overlap_ms": 300,
+            "start_overlap_ms": 600,
+            "overrides": {"cs": {"max_speech_ms": 6000, "end_overlap_ms": 800, "start_overlap_ms": 1500}},
+        })
+        assert cfg.effective("cs") == (6000, 800, 1500)
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +128,12 @@ class TestYamlLoading:
             "audio": {"device_id": "usb-mixer"},
             "transcription": {"model": "small", "language": "cs"},
             "stabilization": {"silence_ms": 500, "stable_ms": 1500},
-            "vad": {"max_speech_ms": 5000, "end_overlap_ms": 800, "start_overlap_ms": 1200},
+            "vad": {
+                "max_speech_ms": 5000,
+                "end_overlap_ms": 800,
+                "start_overlap_ms": 1200,
+                "overrides": {"cs": {"max_speech_ms": 9000}},
+            },
         }
         yaml_file = tmp_path / "config.yaml"
         yaml_file.write_text(yaml.dump(payload))
@@ -107,6 +155,8 @@ class TestYamlLoading:
         assert cfg.vad.max_speech_ms == 5000
         assert cfg.vad.end_overlap_ms == 800
         assert cfg.vad.start_overlap_ms == 1200
+        assert cfg.vad.effective("cs") == (9000, 800, 1200)
+        assert cfg.vad.effective("en") == (5000, 800, 1200)
 
     def test_missing_yaml_file_falls_back_to_defaults(self, tmp_path):
         """If the YAML file does not exist, all defaults still apply."""
@@ -163,3 +213,5 @@ class TestLoadConfig:
         assert cfg.vad.max_speech_ms == 2_000
         assert cfg.vad.end_overlap_ms == 300
         assert cfg.vad.start_overlap_ms == 600
+        assert cfg.vad.effective("cs") == (6000, 800, 1500)
+        assert cfg.vad.effective("en") == (2_000, 300, 600)
