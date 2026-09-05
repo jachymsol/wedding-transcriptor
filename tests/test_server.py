@@ -7,19 +7,23 @@ any I/O.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 import urllib.error
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+import websockets
 
 from transcriptor.config import AppConfig, ServerConfig, StabilizationConfig
 from transcriptor.server import (
     ConnectionState,
     ServerClient,
+    _AsyncioWsBridge,
+    _default_ws_factory,
     fetch_last_segment_id,
 )
 from transcriptor.stabilization import TranscriptSegment
@@ -84,6 +88,103 @@ class _FakeWs:
     def disconnect(self) -> None:
         """Simulate remote close."""
         self._stop.set()
+
+
+# ---------------------------------------------------------------------------
+# _default_ws_factory / _AsyncioWsBridge — real (loopback) WebSocket I/O
+#
+# Unlike the rest of this file (which injects fake ws_factory/http_poster
+# callables so ServerClient tests never touch the network), these tests
+# exercise the *real* default factory end-to-end against a local
+# `websockets.serve` server, since this is exactly the code path that was
+# found to hang/fail using `websockets.sync.client` against a real
+# deployment (see server.py's module docstring). Regression coverage here
+# guards against reintroducing that hang.
+# ---------------------------------------------------------------------------
+
+class _LocalEchoServer:
+    """A tiny local `websockets.serve` server run on its own thread/loop.
+
+    Records every message received on ``self.received`` and is reachable at
+    ``ws://127.0.0.1:{self.port}/`` once :meth:`start` returns.
+    """
+
+    def __init__(self) -> None:
+        self.received: List[str] = []
+        self.port: int = 0
+        self._ready = threading.Event()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        assert self._ready.wait(timeout=5.0), "local test WS server never started"
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+
+    def _run(self) -> None:
+        async def handler(ws):
+            async for message in ws:
+                self.received.append(message)
+
+        async def main():
+            async with websockets.serve(handler, "127.0.0.1", 0) as server:
+                self.port = server.sockets[0].getsockname()[1]
+                self._ready.set()
+                while not self._stop_event.is_set():
+                    await asyncio.sleep(0.02)
+
+        asyncio.run(main())
+
+
+class TestDefaultWsFactory:
+    def test_connect_send_and_close_round_trip(self):
+        server = _LocalEchoServer()
+        server.start()
+        try:
+            bridge = _default_ws_factory(f"ws://127.0.0.1:{server.port}/", {"X-Test": "1"})
+            try:
+                bridge.send('{"hello": "world"}')
+                deadline = time.monotonic() + 2.0
+                while not server.received and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert server.received == ['{"hello": "world"}']
+            finally:
+                bridge.close()
+        finally:
+            server.stop()
+
+    def test_recv_times_out_when_no_message_arrives(self):
+        server = _LocalEchoServer()
+        server.start()
+        try:
+            bridge = _default_ws_factory(f"ws://127.0.0.1:{server.port}/")
+            try:
+                with pytest.raises(TimeoutError):
+                    bridge.recv(timeout=0.2)
+            finally:
+                bridge.close()
+        finally:
+            server.stop()
+
+
+class TestAsyncioWsBridgeTimeout:
+    def test_connect_raises_promptly_instead_of_hanging(self):
+        """Regression test for the ~60s hang reproduced against a real
+        deployment when using websockets.sync.client — connect() must
+        respect open_timeout even when nothing responds on the other end.
+        """
+        bridge = _AsyncioWsBridge()
+        t0 = time.monotonic()
+        with pytest.raises(Exception):
+            # TEST-NET-1 (RFC 5737): reserved for documentation, nothing
+            # listens here, so no response will ever arrive.
+            bridge.connect("ws://192.0.2.1:81/", {}, open_timeout=2.0)
+        assert time.monotonic() - t0 < 5.0, "connect() did not respect open_timeout"
 
 
 # ---------------------------------------------------------------------------

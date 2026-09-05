@@ -22,6 +22,22 @@ Injection seams (for testing)
   ``.close()``.
 * *http_poster* — ``callable(url: str, payload: bytes) → bool``.
 
+Why the WebSocket transport bridges to asyncio
+------------------------------------------------
+The default *ws_factory* (:func:`_default_ws_factory`) uses ``websockets``'
+**asyncio** client (:func:`websockets.connect`) internally, bridged to the
+synchronous duck-typed interface above via :class:`_AsyncioWsBridge`. This
+is deliberate: the ``websockets.sync.client`` (threading-based) client was
+found, via direct reproduction against a real deployment, to hang for
+~60 seconds and then fail on every single connection attempt against one
+production server/proxy combination — across every tested library version
+(12.0 through 16.0) — while the asyncio client connected instantly and
+reliably (100s of consecutive successful connects) against the exact same
+URL, token, and headers. The root cause appears to be specific to the sync
+client's threading implementation; since :class:`_AsyncioWsBridge` isolates
+that on a dedicated event-loop thread per connection attempt, the rest of
+this module is unaffected and unaware of the underlying asyncio machinery.
+
 Usage::
 
     client = ServerClient(config, queue)
@@ -34,6 +50,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -52,6 +69,7 @@ from transcriptor.storage import SegmentQueue
 log = logging.getLogger(__name__)
 
 RETRY_INTERVAL_S: float = 5.0
+_WS_OPEN_TIMEOUT_S: float = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -68,15 +86,103 @@ class ConnectionState(Enum):
 # Default transport implementations
 # ---------------------------------------------------------------------------
 
+class _AsyncioWsBridge:
+    """Bridges an asyncio ``websockets`` connection to a synchronous
+    ``.send(str)`` / ``.recv(timeout)`` / ``.close()`` duck-type.
+
+    Runs a dedicated event loop on its own background thread for the
+    lifetime of one WebSocket connection attempt. All calls block the
+    caller's thread until the corresponding coroutine completes (or raises),
+    preserving the same synchronous contract the rest of this module relies
+    on — callers don't need to know asyncio is involved at all.
+    """
+
+    def __init__(self) -> None:
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
+        self._ws: Any = None
+
+    def connect(
+        self,
+        url: str,
+        additional_headers: dict,
+        open_timeout: float = _WS_OPEN_TIMEOUT_S,
+    ) -> None:
+        """Open the connection; raises on failure or timeout."""
+        ready = threading.Event()
+
+        def _run_loop() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._loop = loop
+            ready.set()
+            loop.run_forever()
+            loop.close()
+
+        self._loop_thread = threading.Thread(
+            target=_run_loop, daemon=True, name="ws-asyncio-loop"
+        )
+        self._loop_thread.start()
+        ready.wait()
+
+        import websockets
+
+        async def _connect():
+            return await websockets.connect(url, additional_headers=additional_headers)
+
+        future = asyncio.run_coroutine_threadsafe(_connect(), self._loop)
+        try:
+            self._ws = future.result(timeout=open_timeout)
+        except Exception:
+            self._shutdown_loop()
+            raise
+
+    def send(self, payload: str) -> None:
+        future = asyncio.run_coroutine_threadsafe(self._ws.send(payload), self._loop)
+        future.result(timeout=_WS_OPEN_TIMEOUT_S)
+
+    def recv(self, timeout: float = 1.0) -> Any:
+        async def _recv():
+            return await asyncio.wait_for(self._ws.recv(), timeout=timeout)
+
+        future = asyncio.run_coroutine_threadsafe(_recv(), self._loop)
+        try:
+            return future.result(timeout=timeout + 1.0)
+        except asyncio.TimeoutError:
+            raise TimeoutError from None
+
+    def close(self) -> None:
+        if self._loop is not None and self._ws is not None:
+            future = asyncio.run_coroutine_threadsafe(self._ws.close(), self._loop)
+            try:
+                future.result(timeout=5.0)
+            except Exception:
+                pass
+        self._shutdown_loop()
+
+    def _shutdown_loop(self) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop_thread is not None:
+            self._loop_thread.join(timeout=5.0)
+
+
 def _default_ws_factory(url: str, additional_headers: dict | None = None):
-    """Open a synchronous WebSocket connection (requires websockets >= 12)."""
+    """Open a WebSocket connection (requires websockets >= 14).
+
+    See the module docstring ("Why the WebSocket transport bridges to
+    asyncio") for why this uses :class:`_AsyncioWsBridge` instead of
+    ``websockets.sync.client`` directly.
+    """
     try:
-        from websockets.sync.client import connect
+        import websockets  # noqa: F401  (import-checked here for the error message)
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
             "websockets package not installed; run: pip install websockets"
         ) from exc
-    return connect(url, additional_headers=additional_headers or {})
+    bridge = _AsyncioWsBridge()
+    bridge.connect(url, additional_headers or {})
+    return bridge
 
 
 def _default_http_poster(url: str, payload: bytes, headers: dict | None = None) -> bool:
