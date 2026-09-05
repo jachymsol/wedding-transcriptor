@@ -23,8 +23,8 @@ from transcriptor.config import (
 # ---------------------------------------------------------------------------
 
 class TestDefaults:
-    def test_server_websocket_url(self):
-        assert ServerConfig().websocket_url == "wss://translate.example.com/ws"
+    def test_server_host(self):
+        assert ServerConfig().host == "translate.example.com"
 
     def test_audio_device_id(self):
         assert AudioConfig().device_id == "default"
@@ -144,8 +144,8 @@ class TestPriority:
         assert cfg.event_id == "override-event"
 
     def test_init_kwargs_override_nested_server(self):
-        cfg = AppConfig(server=ServerConfig(websocket_url="wss://override.example.com/ws"))
-        assert cfg.server.websocket_url == "wss://override.example.com/ws"
+        cfg = AppConfig(server=ServerConfig(host="override.example.com"))
+        assert cfg.server.host == "override.example.com"
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +157,7 @@ class TestYamlLoading:
         """A complete config.yaml is parsed into every nested model correctly."""
         payload = {
             "event_id": "yaml-wedding",
-            "server": {"websocket_url": "wss://yaml.example.com/ws"},
+            "server": {"host": "yaml.example.com"},
             "audio": {"device_id": "usb-mixer"},
             "transcription": {
                 "model": "small",
@@ -183,7 +183,7 @@ class TestYamlLoading:
 
         cfg = _TmpConfig()
         assert cfg.event_id == "yaml-wedding"
-        assert cfg.server.websocket_url == "wss://yaml.example.com/ws"
+        assert cfg.server.host == "yaml.example.com"
         assert cfg.audio.device_id == "usb-mixer"
         assert cfg.transcription.model == "small"
         assert cfg.transcription.language == "cs"
@@ -242,11 +242,12 @@ class TestLoadConfig:
         """The values in the committed config.yaml match current operator config."""
         cfg = load_config()
         assert cfg.event_id == "wedding-2027"
-        assert cfg.server.websocket_url == "wss://translate.example.com/ws"
+        assert cfg.server.host == "wedding-translator-production.up.railway.app"
         assert cfg.audio.device_id == "default"
         assert cfg.transcription.model == "mlx-community/whisper-medium"
         assert cfg.transcription.language == "en"
-        assert cfg.transcription.initial_prompt("en") is None
+        assert cfg.transcription.initial_prompt("en") is not None
+        assert "wedding" in cfg.transcription.initial_prompt("en").lower()
         assert cfg.transcription.initial_prompt("cs") is not None
         assert "svatebn" in cfg.transcription.initial_prompt("cs").lower()
         assert cfg.stabilization.silence_ms == 300

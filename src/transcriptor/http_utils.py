@@ -1,41 +1,62 @@
-"""Shared HTTP URL helpers for talking to the translation server's admin API.
+"""Shared URL-building helpers for talking to the translation server.
 
 Both :mod:`transcriptor.server` (background WebSocket/HTTP client) and
 :mod:`transcriptor.startup` (the operator-facing startup dialog) need to
-derive an HTTP(S) base URL from the configured ``wss://``/``ws://``
-WebSocket URL, and both need to build ``/admin/events/{event_id}`` URLs.
-This module is the single source of truth for that logic so it isn't
-duplicated (and doesn't drift) across call sites.
+build the various endpoint URLs — WebSocket ingest, HTTP ingest fallback,
+and the admin API — from the configured bare ``server.host`` (e.g.
+``"translate.example.com"`` or ``"localhost:3000"``). This module is the
+single source of truth for that logic so it isn't duplicated (and doesn't
+drift) across call sites.
+
+Scheme inference
+-----------------
+A host of ``localhost`` or ``127.0.0.1`` (with or without a port) is treated
+as a local development server and addressed over unencrypted ``ws://``/
+``http://``. Any other host is addressed over ``wss://``/``https://``.
 """
 
 from __future__ import annotations
 
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote
 
-__all__ = ["ws_url_to_http", "admin_url"]
+__all__ = ["ws_url", "http_ingest_url", "admin_url"]
+
+_LOCAL_HOSTNAMES = {"localhost", "127.0.0.1"}
 
 
-def ws_url_to_http(ws_url: str) -> str:
-    """Rewrite ``wss://`` -> ``https://`` or ``ws://`` -> ``http://``.
+def _is_local(host: str) -> bool:
+    """Return True if *host* (optionally ``host:port``) is a local dev host."""
+    hostname = host.split(":", 1)[0]
+    return hostname in _LOCAL_HOSTNAMES
 
-    URLs that already use an HTTP(S) scheme (or an unrecognised scheme) are
-    returned unchanged.
+
+def _ws_scheme(host: str) -> str:
+    return "ws" if _is_local(host) else "wss"
+
+
+def _http_scheme(host: str) -> str:
+    return "http" if _is_local(host) else "https"
+
+
+def ws_url(host: str, api_key: str = "") -> str:
+    """Build the WebSocket ingest URL for *host*.
+
+    Includes ``?token=<api_key>`` (URL-encoded) as a query parameter when
+    *api_key* is non-empty, so the server can authenticate the WebSocket
+    upgrade request even if a proxy in front of it strips the
+    ``Authorization`` header (a common limitation for WS handshakes).
     """
-    if ws_url.startswith("wss://"):
-        return "https://" + ws_url[6:]
-    if ws_url.startswith("ws://"):
-        return "http://" + ws_url[5:]
-    return ws_url
+    url = f"{_ws_scheme(host)}://{host}/ws/ingest"
+    if api_key:
+        url += f"?token={quote(api_key, safe='')}"
+    return url
 
 
-def admin_url(ws_url: str, event_id: str) -> str:
-    """Build ``scheme://host[:port]/admin/events/{event_id}``.
+def http_ingest_url(host: str) -> str:
+    """Build the HTTPS POST ingest URL for *host* (fallback transport)."""
+    return f"{_http_scheme(host)}://{host}/ingest"
 
-    Any path suffix carried by *ws_url* (e.g. ``wss://host/ws``) is
-    stripped, so the admin API is always addressed at the server root
-    regardless of what path the WebSocket endpoint lives at.
-    """
-    http_url = ws_url_to_http(ws_url).rstrip("/")
-    parsed = urlparse(http_url)
-    origin = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
-    return f"{origin}/admin/events/{event_id}"
+
+def admin_url(host: str, event_id: str) -> str:
+    """Build ``scheme://host/admin/events/{event_id}`` for *host*."""
+    return f"{_http_scheme(host)}://{host}/admin/events/{event_id}"

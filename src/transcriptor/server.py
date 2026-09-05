@@ -6,9 +6,9 @@ events to the translation server.
 Connection strategy
 -------------------
 1. **WebSocket** (preferred) — persistent connection to
-   ``config.server.websocket_url`` (``wss://…``).
-2. **HTTPS POST** (fallback) — stateless POST to the same host/path with
-   ``wss://`` rewritten to ``https://`` (``ws://`` → ``http://``).
+   ``wss://{config.server.host}/ws/ingest`` (or ``ws://`` for local hosts).
+2. **HTTPS POST** (fallback) — stateless POST to
+   ``https://{config.server.host}/ingest`` (or ``http://`` for local hosts).
 
 On any failure the background thread waits ``RETRY_INTERVAL_S`` (5 s) and
 retries from the top.  The offline
@@ -44,7 +44,8 @@ from typing import Any, Callable, Optional
 
 from transcriptor.config import AppConfig
 from transcriptor.http_utils import admin_url
-from transcriptor.http_utils import ws_url_to_http as _ws_url_to_http
+from transcriptor.http_utils import http_ingest_url as _http_ingest_url
+from transcriptor.http_utils import ws_url as _ws_url
 from transcriptor.stabilization import TranscriptSegment
 from transcriptor.storage import SegmentQueue
 
@@ -78,13 +79,13 @@ def _default_ws_factory(url: str, additional_headers: dict | None = None):
     return connect(url, additional_headers=additional_headers or {})
 
 
-def _default_http_poster(url: str, payload: bytes) -> bool:
+def _default_http_poster(url: str, payload: bytes, headers: dict | None = None) -> bool:
     """HTTP POST *payload* (JSON bytes) to *url*; return True on 2xx."""
     try:
         req = urllib.request.Request(
             url,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **(headers or {})},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -137,7 +138,7 @@ def fetch_last_segment_id(
     Callers should use ``fetch_last_segment_id(config) + 1`` as the starting
     ``segment_id`` for a new :class:`~transcriptor.stabilization.Stabilizer`.
     """
-    url = admin_url(config.server.websocket_url, config.event_id)
+    url = admin_url(config.server.host, config.event_id)
     req = urllib.request.Request(url, method="GET")
     if config.api_key:
         req.add_header("Authorization", f"Bearer {config.api_key}")
@@ -191,7 +192,7 @@ class ServerClient:
     Parameters
     ----------
     config:
-        Application config — only ``config.server.websocket_url`` is used.
+        Application config — only ``config.server.host`` is used.
     queue:
         Offline :class:`~transcriptor.storage.SegmentQueue` for durable
         persistence during outages.
@@ -214,10 +215,10 @@ class ServerClient:
         http_poster: Optional[Callable] = None,
         retry_interval_s: float = RETRY_INTERVAL_S,
     ) -> None:
-        self._url_ws = config.server.websocket_url
-        self._url_http = _ws_url_to_http(self._url_ws)
         self._event_id = config.event_id
         self._api_key = config.api_key
+        self._url_ws = _ws_url(config.server.host, self._api_key)
+        self._url_http = _http_ingest_url(config.server.host)
         self._queue = queue
         self._ws_factory = ws_factory or _default_ws_factory
         self._http_poster = http_poster or _default_http_poster
@@ -494,7 +495,8 @@ class ServerClient:
                     self._ws_conn = None
 
         elif state == ConnectionState.CONNECTED_HTTP:
-            ok = self._http_poster(self._url_http, payload.encode())
+            headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+            ok = self._http_poster(self._url_http, payload.encode(), headers)
             if ok:
                 log.debug("Payload sent via HTTP POST (%d bytes)", len(payload))
             return ok

@@ -20,7 +20,6 @@ from transcriptor.config import AppConfig, ServerConfig, StabilizationConfig
 from transcriptor.server import (
     ConnectionState,
     ServerClient,
-    _ws_url_to_http,
     fetch_last_segment_id,
 )
 from transcriptor.stabilization import TranscriptSegment
@@ -31,8 +30,8 @@ from transcriptor.storage import SegmentQueue
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_config(ws_url: str = "wss://example.com/ws") -> AppConfig:
-    return AppConfig(server=ServerConfig(websocket_url=ws_url))
+def _make_config(host: str = "example.com") -> AppConfig:
+    return AppConfig(server=ServerConfig(host=host))
 
 
 def _make_segment(
@@ -85,24 +84,6 @@ class _FakeWs:
     def disconnect(self) -> None:
         """Simulate remote close."""
         self._stop.set()
-
-
-# ---------------------------------------------------------------------------
-# _ws_url_to_http
-# ---------------------------------------------------------------------------
-
-class TestWsUrlToHttp:
-    def test_wss_becomes_https(self):
-        assert _ws_url_to_http("wss://example.com/ws") == "https://example.com/ws"
-
-    def test_ws_becomes_http(self):
-        assert _ws_url_to_http("ws://example.com/ws") == "http://example.com/ws"
-
-    def test_unknown_scheme_unchanged(self):
-        assert _ws_url_to_http("https://example.com") == "https://example.com"
-
-    def test_path_and_port_preserved(self):
-        assert _ws_url_to_http("wss://host:8443/path/ws") == "https://host:8443/path/ws"
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +197,7 @@ class TestSendHttp:
 
     def test_send_transmits_via_http(self, tmp_queue):
         calls = []
-        def poster(url, payload):
+        def poster(url, payload, headers=None):
             calls.append((url, payload))
             return True
 
@@ -226,27 +207,92 @@ class TestSendHttp:
         assert b"HTTP segment" in calls[0][1]
 
     def test_send_via_http_does_not_queue_on_success(self, tmp_queue):
-        client = self._http_client(tmp_queue, lambda u, p: True)
+        client = self._http_client(tmp_queue, lambda u, p, h=None: True)
         client.send(_make_segment(1))
         assert tmp_queue.count() == 0
 
     def test_send_via_http_queues_on_failure(self, tmp_queue):
-        client = self._http_client(tmp_queue, lambda u, p: False)
+        client = self._http_client(tmp_queue, lambda u, p, h=None: False)
         client.send(_make_segment(1))
         assert tmp_queue.count() == 1
 
-    def test_http_url_derived_from_ws_url(self, tmp_queue):
+    def test_http_url_derived_from_host(self, tmp_queue):
         captured = []
-        def poster(url, payload):
+        def poster(url, payload, headers=None):
             captured.append(url)
             return True
 
-        config = _make_config(ws_url="wss://host:9000/ingest/ws")
+        config = _make_config(host="host:9000")
         client = ServerClient(config, tmp_queue, http_poster=poster)
         with client._state_lock:
             client._state = ConnectionState.CONNECTED_HTTP
         client.send(_make_segment(1))
-        assert captured[0] == "https://host:9000/ingest/ws"
+        assert captured[0] == "https://host:9000/ingest"
+
+    def test_authorization_header_sent_when_api_key_set(self, tmp_queue):
+        captured_headers = []
+        def poster(url, payload, headers=None):
+            captured_headers.append(headers)
+            return True
+
+        config = AppConfig(api_key="secret-key", server=ServerConfig(host="example.com"))
+        client = ServerClient(config, tmp_queue, http_poster=poster)
+        with client._state_lock:
+            client._state = ConnectionState.CONNECTED_HTTP
+        client.send(_make_segment(1))
+        assert captured_headers[0] == {"Authorization": "Bearer secret-key"}
+
+    def test_no_authorization_header_when_api_key_empty(self, tmp_queue):
+        captured_headers = []
+        def poster(url, payload, headers=None):
+            captured_headers.append(headers)
+            return True
+
+        config = AppConfig(api_key="", server=ServerConfig(host="example.com"))
+        client = ServerClient(config, tmp_queue, http_poster=poster)
+        with client._state_lock:
+            client._state = ConnectionState.CONNECTED_HTTP
+        client.send(_make_segment(1))
+        assert captured_headers[0] == {}
+
+
+# ---------------------------------------------------------------------------
+# WebSocket connection URL / headers — auth (FR-007/§7)
+# ---------------------------------------------------------------------------
+
+class TestWebSocketAuth:
+    def test_ws_url_includes_token_query_param(self, tmp_queue):
+        captured = []
+        def ws_factory(url, additional_headers=None):
+            captured.append(url)
+            raise OSError("stop after capture")
+
+        config = AppConfig(api_key="secret-key", server=ServerConfig(host="example.com"))
+        client = ServerClient(config, tmp_queue, ws_factory=ws_factory)
+        client._try_ws()
+        assert captured[0] == "wss://example.com/ws/ingest?token=secret-key"
+
+    def test_ws_no_token_param_when_api_key_empty(self, tmp_queue):
+        captured = []
+        def ws_factory(url, additional_headers=None):
+            captured.append(url)
+            raise OSError("stop after capture")
+
+        config = AppConfig(api_key="", server=ServerConfig(host="example.com"))
+        client = ServerClient(config, tmp_queue, ws_factory=ws_factory)
+        client._try_ws()
+        assert captured[0] == "wss://example.com/ws/ingest"
+
+    def test_ws_authorization_header_also_sent_when_api_key_set(self, tmp_queue):
+        captured_headers = []
+        def ws_factory(url, additional_headers=None):
+            captured_headers.append(additional_headers)
+            raise OSError("stop after capture")
+
+        config = AppConfig(api_key="secret-key", server=ServerConfig(host="example.com"))
+        client = ServerClient(config, tmp_queue, ws_factory=ws_factory)
+        client._try_ws()
+        assert captured_headers[0] == {"Authorization": "Bearer secret-key"}
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +308,7 @@ class TestQueueDrain:
         ws = _FakeWs()
         connected = threading.Event()
 
-        def ws_factory(url):
+        def ws_factory(url, additional_headers=None):
             # Signal that the factory was called, then return ws immediately.
             # Blocking here before returning ws would prevent _drain_queue()
             # from running, creating a circular dependency with any "wait for
@@ -282,7 +328,9 @@ class TestQueueDrain:
 
         client.stop()
 
-        assert len(ws.sent) == 3
+        # ws.sent[0] is the "start" control message sent on every new
+        # WS connection; the 3 queued segments follow it.
+        assert len(ws.sent) == 4
         assert tmp_queue.count() == 0
 
     def test_http_fallback_drains_queue(self, tmp_queue):
@@ -293,19 +341,19 @@ class TestQueueDrain:
 
         ws_attempts = 0
 
-        def ws_factory(url):
+        def ws_factory(url, additional_headers=None):
             nonlocal ws_attempts
             ws_attempts += 1
             raise OSError("no WS")
 
-        def poster(url, payload):
+        def poster(url, payload, headers=None):
             http_calls.append(payload)
             return True
 
         # retry_interval_s=0 so it loops fast; stop after first HTTP drain
         stop_event = threading.Event()
 
-        def fast_factory(url):
+        def fast_factory(url, additional_headers=None):
             raise OSError("no WS")
 
         client = ServerClient(
@@ -346,7 +394,7 @@ class TestQueueDrain:
                 pass
 
         client = ServerClient(_make_config(), tmp_queue,
-                              ws_factory=lambda url: FailAfterOne(),
+                              ws_factory=lambda url, additional_headers=None: FailAfterOne(),
                               retry_interval_s=60)  # don't retry during test
         client.start()
 
@@ -357,8 +405,10 @@ class TestQueueDrain:
         time.sleep(0.1)  # let drain complete
         client.stop()
 
-        # One was drained, two remain
-        assert tmp_queue.count() == 2
+        # send_count: 1 = "start" control message (succeeds), 2 = first
+        # queued segment (fails, since send_count > 1) — drain stops
+        # immediately, so no queued segments are removed.
+        assert tmp_queue.count() == 3
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +424,7 @@ class TestStartStop:
         ws = _FakeWs()
         client = ServerClient(
             _make_config(), tmp_queue,
-            ws_factory=lambda url: ws,
+            ws_factory=lambda url, additional_headers=None: ws,
             retry_interval_s=60,
         )
         client.start()
@@ -387,7 +437,7 @@ class TestStartStop:
         ws = _FakeWs()
         client = ServerClient(
             _make_config(), tmp_queue,
-            ws_factory=lambda url: ws,
+            ws_factory=lambda url, additional_headers=None: ws,
             retry_interval_s=60,
         )
         client.start()
@@ -399,7 +449,7 @@ class TestStartStop:
         ws = _FakeWs()
         client = ServerClient(
             _make_config(), tmp_queue,
-            ws_factory=lambda url: ws,
+            ws_factory=lambda url, additional_headers=None: ws,
             retry_interval_s=60,
         )
         client.start()
@@ -418,14 +468,14 @@ class TestRetry:
         within 2 × retry_interval + buffer."""
         attempts = []
 
-        def failing_factory(url):
+        def failing_factory(url, additional_headers=None):
             attempts.append(time.monotonic())
             raise OSError("fail")
 
         client = ServerClient(
             _make_config(), tmp_queue,
             ws_factory=failing_factory,
-            http_poster=lambda u, p: False,
+            http_poster=lambda u, p, h=None: False,
             retry_interval_s=0.1,
         )
         client.start()
@@ -438,7 +488,7 @@ class TestRetry:
         """After a WS drop, the loop should reconnect within retry_interval."""
         connections = []
 
-        def factory(url):
+        def factory(url, additional_headers=None):
             ws = _FakeWs()
             connections.append(ws)
             if len(connections) == 1:
@@ -548,7 +598,7 @@ class TestFetchLastSegmentId:
 
         config = AppConfig(
             event_id="wedding-2027",
-            server=ServerConfig(websocket_url="wss://host:8443/ws"),
+            server=ServerConfig(host="host:8443"),
         )
         fetch_last_segment_id(config, opener=opener)
         assert seen_urls == ["https://host:8443/admin/events/wedding-2027"]
@@ -562,7 +612,7 @@ class TestFetchLastSegmentId:
 
         config = AppConfig(
             api_key="secret-key",
-            server=ServerConfig(websocket_url="wss://example.com/ws"),
+            server=ServerConfig(host="example.com"),
         )
         fetch_last_segment_id(config, opener=opener)
         assert seen_headers[0].get("Authorization") == "Bearer secret-key"

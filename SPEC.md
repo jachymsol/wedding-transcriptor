@@ -194,17 +194,22 @@ The system shall transmit finalized transcript segments to the translation serve
 
 ### Transport
 
-* WebSocket
+* WebSocket — `wss://{server.host}/ws/ingest` (or `ws://` for local hosts).
+  Authenticated via both a `?token={api_key}` query parameter (survives
+  proxies that strip headers on the upgrade request) and an
+  `Authorization: Bearer {api_key}` header, when an API key is configured.
 
 ### Fallback
 
-* HTTPS POST
+* HTTPS POST — `https://{server.host}/ingest` (or `http://` for local
+  hosts), with `Authorization: Bearer {api_key}` when an API key is
+  configured.
 
 ### Admin API
 
 The client uses a small REST admin API on the same host as the WebSocket
-server (path derived by rewriting `wss://`/`ws://` to `https://`/`http://`
-and stripping any path suffix):
+server (``server.host`` from config, with scheme inferred: ``localhost``/
+``127.0.0.1`` use ``http://``, everything else uses ``https://``):
 
 * `POST /admin/events/{event_id}` — registers an event. Used by the
   "Register" button in the startup dialog.
@@ -447,7 +452,7 @@ SQLite
 event_id: wedding-2027
 
 server:
-  websocket_url: wss://translate.example.com/ws
+  host: translate.example.com
 
 audio:
   device_id: default

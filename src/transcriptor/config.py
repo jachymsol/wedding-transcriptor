@@ -20,7 +20,10 @@ _CONFIG_FILE = CONFIG_FILE                            # keep old name for intern
 
 
 class ServerConfig(BaseModel):
-    websocket_url: str = "wss://translate.example.com/ws"
+    #: Bare host (optionally with port), e.g. "translate.example.com" or
+    #: "localhost:3000". Scheme (ws/wss, http/https) is inferred: "localhost"
+    #: and "127.0.0.1" use unencrypted ws/http; everything else uses wss/https.
+    host: str = "translate.example.com"
 
 
 class AudioConfig(BaseModel):

@@ -37,7 +37,7 @@ def _make_config(**kwargs) -> AppConfig:
     """Return an AppConfig with sensible test defaults, overridable via kwargs."""
     defaults = dict(
         event_id="test-event",
-        server=ServerConfig(websocket_url="wss://test.example.com/ws"),
+        server=ServerConfig(host="test.example.com"),
         audio=AudioConfig(device_id="default"),
         transcription=TranscriptionConfig(model="medium", language="en"),
         stabilization=StabilizationConfig(silence_ms=700, stable_ms=2000),
@@ -140,19 +140,19 @@ class TestLabelToDeviceId:
 class TestSaveConfigYaml:
     def test_writes_event_id(self, tmp_path):
         p = tmp_path / "config.yaml"
-        save_config_yaml(p, "my-event", "wss://x.com/ws", "default")
+        save_config_yaml(p, "my-event", "x.com", "default")
         data = yaml.safe_load(p.read_text())
         assert data["event_id"] == "my-event"
 
-    def test_writes_websocket_url(self, tmp_path):
+    def test_writes_host(self, tmp_path):
         p = tmp_path / "config.yaml"
-        save_config_yaml(p, "e", "wss://new.example.com/ws", "default")
+        save_config_yaml(p, "e", "new.example.com", "default")
         data = yaml.safe_load(p.read_text())
-        assert data["server"]["websocket_url"] == "wss://new.example.com/ws"
+        assert data["server"]["host"] == "new.example.com"
 
     def test_writes_device_id(self, tmp_path):
         p = tmp_path / "config.yaml"
-        save_config_yaml(p, "e", "wss://x.com/ws", "USB Mixer")
+        save_config_yaml(p, "e", "x.com", "USB Mixer")
         data = yaml.safe_load(p.read_text())
         assert data["audio"]["device_id"] == "USB Mixer"
 
@@ -163,7 +163,7 @@ class TestSaveConfigYaml:
             "transcription": {"model": "medium", "language": "cs"},
             "vad": {"max_speech_ms": 8000, "end_overlap_ms": 800, "start_overlap_ms": 1200},
         }))
-        save_config_yaml(p, "new-event", "wss://x.com/ws", "default")
+        save_config_yaml(p, "new-event", "x.com", "default")
         data = yaml.safe_load(p.read_text())
         assert data["transcription"]["model"] == "medium"
         assert data["transcription"]["language"] == "cs"
@@ -174,19 +174,19 @@ class TestSaveConfigYaml:
     def test_creates_file_if_absent(self, tmp_path):
         p = tmp_path / "new_config.yaml"
         assert not p.exists()
-        save_config_yaml(p, "e", "wss://x.com/ws", "default")
+        save_config_yaml(p, "e", "x.com", "default")
         assert p.exists()
 
     def test_unicode_event_id_preserved(self, tmp_path):
         p = tmp_path / "config.yaml"
-        save_config_yaml(p, "svatba-2027-\u010cesko", "wss://x.com/ws", "default")
+        save_config_yaml(p, "svatba-2027-\u010cesko", "x.com", "default")
         data = yaml.safe_load(p.read_text())
         assert data["event_id"] == "svatba-2027-\u010cesko"
 
     def test_overwrites_existing_event_id(self, tmp_path):
         p = tmp_path / "config.yaml"
         p.write_text(yaml.dump({"event_id": "old-event"}))
-        save_config_yaml(p, "new-event", "wss://x.com/ws", "default")
+        save_config_yaml(p, "new-event", "x.com", "default")
         data = yaml.safe_load(p.read_text())
         assert data["event_id"] == "new-event"
 
@@ -200,7 +200,7 @@ class TestStartupDialogDefaults:
         assert dialog._event_id_var.get() == "test-event"
 
     def test_server_url_pre_filled(self, dialog):
-        assert dialog._server_url_var.get() == "wss://test.example.com/ws"
+        assert dialog._server_url_var.get() == "test.example.com"
 
     def test_device_defaults_to_default_label(self, dialog):
         assert dialog._device_var.get() == DEVICE_LABEL_DEFAULT
@@ -246,8 +246,8 @@ class TestStartupDialogStart:
         assert result.event_id == "wedding-2028"
 
     def test_server_url_overridden(self, dialog):
-        result = self._start(dialog, server_url="wss://prod.example.com/ws")
-        assert result.server.websocket_url == "wss://prod.example.com/ws"
+        result = self._start(dialog, server_url="prod.example.com")
+        assert result.server.host == "prod.example.com"
 
     def test_device_default_label_maps_to_default(self, dialog):
         result = self._start(dialog, device_label=DEVICE_LABEL_DEFAULT)
@@ -278,8 +278,8 @@ class TestStartupDialogStart:
         assert result.event_id == "trimmed-event"
 
     def test_whitespace_trimmed_from_server_url(self, dialog):
-        result = self._start(dialog, server_url="  wss://x.com/ws  ")
-        assert result.server.websocket_url == "wss://x.com/ws"
+        result = self._start(dialog, server_url="  x.com  ")
+        assert result.server.host == "x.com"
 
     def test_empty_event_id_falls_back_to_base(self, dialog):
         result = self._start(dialog, event_id="   ")
@@ -287,7 +287,7 @@ class TestStartupDialogStart:
 
     def test_empty_server_url_falls_back_to_base(self, dialog):
         result = self._start(dialog, server_url="   ")
-        assert result.server.websocket_url == "wss://test.example.com/ws"
+        assert result.server.host == "test.example.com"
 
 
 # ---------------------------------------------------------------------------

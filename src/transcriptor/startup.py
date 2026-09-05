@@ -1,7 +1,7 @@
 """Startup configuration dialog — shown once before the main pipeline starts.
 
 Lets the operator review and override the three settings that vary between
-events (event ID, server URL, audio device) without editing ``config.yaml``.
+events (event ID, server host, audio device) without editing ``config.yaml``.
 All other settings (model, VAD tuning, stabilization) are carried forward
 unchanged from the loaded configuration.
 
@@ -13,8 +13,8 @@ Layout::
     │  Event ID                                    │
     │  [wedding-2027                             ] │
     │                                              │
-    │  Server URL                                  │
-    │  [wss://translate.example.com/ws           ] │
+    │  Server Host                                 │
+    │  [translate.example.com                    ] │
     │                                              │
     │  Audio Device                                │
     │  [Default                               ▾ ] [Refresh]
@@ -111,7 +111,7 @@ def label_to_device_id(label: str, devices: list[dict]) -> str:
 def save_config_yaml(
     path: Path,
     event_id: str,
-    websocket_url: str,
+    host: str,
     device_id: str,
     api_key: str = "",
 ) -> None:
@@ -127,8 +127,8 @@ def save_config_yaml(
         Filesystem path to ``config.yaml``.
     event_id:
         New value for the top-level ``event_id`` key.
-    websocket_url:
-        New value for ``server.websocket_url``.
+    host:
+        New value for ``server.host``.
     device_id:
         New value for ``audio.device_id``.
     api_key:
@@ -141,7 +141,7 @@ def save_config_yaml(
 
     data["event_id"] = event_id
     data["api_key"] = api_key
-    data.setdefault("server", {})["websocket_url"] = websocket_url
+    data.setdefault("server", {})["host"] = host
     data.setdefault("audio", {})["device_id"] = device_id
 
     path.write_text(
@@ -185,7 +185,7 @@ class StartupDialog:
 
         # StringVars — created before _build_ui so tests can read them
         self._event_id_var = tk.StringVar(value=config.event_id)
-        self._server_url_var = tk.StringVar(value=config.server.websocket_url)
+        self._server_url_var = tk.StringVar(value=config.server.host)
         self._api_key_var = tk.StringVar(value=config.api_key)
         self._device_var = tk.StringVar()
         self._save_default_var = tk.BooleanVar(value=False)
@@ -235,8 +235,8 @@ class StartupDialog:
             width=46,
         ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
 
-        # ── Server URL ────────────────────────────────────────────────
-        tk.Label(self._root, text="Server URL", font=_LABEL_FONT).grid(
+        # ── Server Host ──────────────────────────────────────────────
+        tk.Label(self._root, text="Server Host", font=_LABEL_FONT).grid(
             row=3, column=0, columnspan=3, sticky="w", pady=(0, 2)
         )
         tk.Entry(
@@ -381,11 +381,11 @@ class StartupDialog:
     def _on_register(self) -> None:
         """POST /admin/events/:event_id — registers the event without starting."""
         event_id = self._event_id_var.get().strip() or self._base_config.event_id
-        ws_url = (
+        host = (
             self._server_url_var.get().strip()
-            or self._base_config.server.websocket_url
+            or self._base_config.server.host
         )
-        url = admin_url(ws_url, event_id)
+        url = admin_url(host, event_id)
 
         log.info("Registering event: POST %s", url)
         try:
@@ -414,7 +414,7 @@ class StartupDialog:
         event_id = self._event_id_var.get().strip() or self._base_config.event_id
         server_url = (
             self._server_url_var.get().strip()
-            or self._base_config.server.websocket_url
+            or self._base_config.server.host
         )
         api_key = self._api_key_var.get().strip()
         device_id = label_to_device_id(self._device_var.get(), self._devices)
@@ -422,7 +422,7 @@ class StartupDialog:
         self._result = AppConfig(
             event_id=event_id,
             api_key=api_key,
-            server=ServerConfig(websocket_url=server_url),
+            server=ServerConfig(host=server_url),
             audio=AudioConfig(device_id=device_id),
             transcription=self._base_config.transcription,
             stabilization=self._base_config.stabilization,

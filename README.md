@@ -88,7 +88,8 @@ time the application is launched.
 event_id: wedding-2027            # sent in every transcript event
 
 server:
-  websocket_url: wss://translate.example.com/ws
+  host: translate.example.com     # bare host (optionally host:port); "localhost"/
+                                  # "127.0.0.1" use ws/http, everything else uses wss/https
 
 audio:
   device_id: default              # "default", a device name substring, or
@@ -140,7 +141,7 @@ A dialog opens before the main window. Fill in:
 | Field | Default | Description |
 |---|---|---|
 | Event ID | from `config.yaml` | Identifies this event in every transcript segment |
-| Server URL | from `config.yaml` | WebSocket URL of the translation server |
+| Server Host | from `config.yaml` | Bare host of the translation server (e.g. `translate.example.com` or `localhost:3000`) |
 | Audio Device | Default | Input device for this session |
 | Save as default | unchecked | Writes the three fields back to `config.yaml` |
 
@@ -175,7 +176,7 @@ the client drains the queue before handling live traffic. No segments are lost a
 long as disk space is available.
 
 The client retries the connection every 5 seconds. If WebSocket remains
-unavailable it falls back to HTTPS POST to the same host and path.
+unavailable it falls back to HTTPS POST to `/ingest` on the same host.
 
 ---
 

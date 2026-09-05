@@ -1,8 +1,9 @@
 event_id: wedding-2027
-api_key: your-secret-api-key
+api_key: your-secret-api-key # can be overriden by $API_KEY
 
 server:
-  websocket_url: ws://localhost:3000/ws/ingest
+  host: wedding-translator-production.up.railway.app
+  # host: localhost:3000
 
 audio:
   device_id: default
