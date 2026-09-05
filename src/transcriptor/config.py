@@ -30,6 +30,19 @@ class AudioConfig(BaseModel):
 class TranscriptionConfig(BaseModel):
     model: str = "medium"
     language: str = "en"
+    #: Per-language Whisper "initial_prompt" priming text, keyed by
+    #: ISO-639-1 code. Whisper is less confident on lower-resource
+    #: languages (e.g. Czech); a short in-language priming snippet biases
+    #: decoding toward the expected vocabulary/orthography and reduces
+    #: hallucinated segments. Languages with no entry get no prompt.
+    initial_prompts: dict[str, str] = {}
+
+    def initial_prompt(self, language: str) -> Optional[str]:
+        """Return the configured initial_prompt for *language*, or None.
+
+        An empty-string entry is treated the same as "not set".
+        """
+        return self.initial_prompts.get(language) or None
 
 
 class StabilizationConfig(BaseModel):

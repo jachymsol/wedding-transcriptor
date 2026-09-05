@@ -35,6 +35,9 @@ class TestDefaults:
     def test_transcription_language(self):
         assert TranscriptionConfig().language == "en"
 
+    def test_transcription_initial_prompts_default_empty(self):
+        assert TranscriptionConfig().initial_prompts == {}
+
     def test_stabilization_silence_ms(self):
         assert StabilizationConfig().silence_ms == 700
 
@@ -59,6 +62,36 @@ class TestDefaults:
         # for this test, which only checks the model field exists)
         cfg = AppConfig(event_id="test-event")
         assert cfg.event_id == "test-event"
+
+
+# ---------------------------------------------------------------------------
+# TranscriptionConfig.initial_prompt() — per-language priming text
+# ---------------------------------------------------------------------------
+
+class TestTranscriptionInitialPrompt:
+    def test_returns_none_when_no_prompts_configured(self):
+        cfg = TranscriptionConfig()
+        assert cfg.initial_prompt("cs") is None
+
+    def test_returns_configured_prompt_for_language(self):
+        cfg = TranscriptionConfig(initial_prompts={"cs": "Svatební proslov."})
+        assert cfg.initial_prompt("cs") == "Svatební proslov."
+
+    def test_returns_none_for_language_without_entry(self):
+        cfg = TranscriptionConfig(initial_prompts={"cs": "Svatební proslov."})
+        assert cfg.initial_prompt("en") is None
+
+    def test_empty_string_entry_treated_as_none(self):
+        cfg = TranscriptionConfig(initial_prompts={"cs": ""})
+        assert cfg.initial_prompt("cs") is None
+
+    def test_parsed_from_yaml_dict(self):
+        cfg = TranscriptionConfig(**{
+            "model": "medium",
+            "language": "en",
+            "initial_prompts": {"cs": "Svatební proslov."},
+        })
+        assert cfg.initial_prompt("cs") == "Svatební proslov."
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +159,11 @@ class TestYamlLoading:
             "event_id": "yaml-wedding",
             "server": {"websocket_url": "wss://yaml.example.com/ws"},
             "audio": {"device_id": "usb-mixer"},
-            "transcription": {"model": "small", "language": "cs"},
+            "transcription": {
+                "model": "small",
+                "language": "cs",
+                "initial_prompts": {"cs": "Svatební proslov."},
+            },
             "stabilization": {"silence_ms": 500, "stable_ms": 1500},
             "vad": {
                 "max_speech_ms": 5000,
@@ -150,6 +187,7 @@ class TestYamlLoading:
         assert cfg.audio.device_id == "usb-mixer"
         assert cfg.transcription.model == "small"
         assert cfg.transcription.language == "cs"
+        assert cfg.transcription.initial_prompt("cs") == "Svatební proslov."
         assert cfg.stabilization.silence_ms == 500
         assert cfg.stabilization.stable_ms == 1500
         assert cfg.vad.max_speech_ms == 5000
@@ -208,6 +246,9 @@ class TestLoadConfig:
         assert cfg.audio.device_id == "default"
         assert cfg.transcription.model == "mlx-community/whisper-medium"
         assert cfg.transcription.language == "en"
+        assert cfg.transcription.initial_prompt("en") is None
+        assert cfg.transcription.initial_prompt("cs") is not None
+        assert "svatebn" in cfg.transcription.initial_prompt("cs").lower()
         assert cfg.stabilization.silence_ms == 300
         assert cfg.stabilization.stable_ms == 1500
         assert cfg.vad.max_speech_ms == 2_000

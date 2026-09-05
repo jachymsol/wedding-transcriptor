@@ -10,6 +10,9 @@ audio:
 transcription:
   model: mlx-community/whisper-medium
   language: en
+  initial_prompts:
+    cs: "Toto je přepis svatebního proslovu. Ženich Jáchym a nevěsta Sophie, rodina, přátelé, svědci, svatba na zámku Chateau de Vaugrenier, gratulace, přípitek, láska, štěstí, novomanželé."
+    en: "This is a transcript of a wedding speech. Groom Jáchym and bride Sophie, family, friends, witnesses, wedding at Chateau de Vaugrenier, congratulations, toast, love, happiness, newlyweds."
 
 stabilization:
   silence_ms: 300

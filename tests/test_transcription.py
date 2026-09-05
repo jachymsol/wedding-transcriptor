@@ -68,9 +68,12 @@ def _make_transcriber(
     segment_texts: list[str] | None = None,
     language: str = "en",
     model_name: str = "medium",
+    initial_prompts: dict[str, str] | None = None,
 ) -> tuple[Transcriber, MagicMock]:
     model = _make_whisper_model(segment_texts)
-    config = TranscriptionConfig(model=model_name, language=language)
+    config = TranscriptionConfig(
+        model=model_name, language=language, initial_prompts=initial_prompts or {}
+    )
     transcriber = Transcriber(config, model=model)
     return transcriber, model
 
@@ -247,6 +250,50 @@ class TestTranscribeModelCall:
         args, _ = model.call_args
         passed_audio = args[0]
         assert np.array_equal(passed_audio, AUDIO_1S)
+
+
+# ---------------------------------------------------------------------------
+# initial_prompt — per-language priming text
+# ---------------------------------------------------------------------------
+
+class TestInitialPrompt:
+    def test_configured_prompt_passed_for_language(self):
+        t, model = _make_transcriber(
+            ["ahoj"], language="cs", initial_prompts={"cs": "Svatební proslov."}
+        )
+        t.transcribe(AUDIO_1S)
+        _, kwargs = model.call_args
+        assert kwargs["initial_prompt"] == "Svatební proslov."
+
+    def test_none_passed_when_no_prompt_configured_for_language(self):
+        t, model = _make_transcriber(
+            ["hi"], language="en", initial_prompts={"cs": "Svatební proslov."}
+        )
+        t.transcribe(AUDIO_1S)
+        _, kwargs = model.call_args
+        assert kwargs["initial_prompt"] is None
+
+    def test_none_passed_when_no_prompts_configured_at_all(self):
+        t, model = _make_transcriber(["hi"], language="en")
+        t.transcribe(AUDIO_1S)
+        _, kwargs = model.call_args
+        assert kwargs["initial_prompt"] is None
+
+    def test_prompt_follows_language_switch(self):
+        t, model = _make_transcriber(
+            ["hi"],
+            language="en",
+            initial_prompts={"cs": "Svatební proslov.", "fr": "Discours de mariage."},
+        )
+        t.set_language("fr")
+        t.transcribe(AUDIO_1S)
+        _, kwargs = model.call_args
+        assert kwargs["initial_prompt"] == "Discours de mariage."
+
+        t.set_language("cs")
+        t.transcribe(AUDIO_1S)
+        _, kwargs = model.call_args
+        assert kwargs["initial_prompt"] == "Svatební proslov."
 
 
 # ---------------------------------------------------------------------------

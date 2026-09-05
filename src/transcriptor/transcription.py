@@ -164,6 +164,7 @@ class Transcriber:
             stored as the callable.  Pass a mock callable in tests to avoid
             downloading real weights.
         """
+        self._config: TranscriptionConfig = config
         self._repo: str = _resolve_mlx_repo(config.model)
         self._language: str = config.language
 
@@ -174,6 +175,7 @@ class Transcriber:
                 np.zeros(1600, dtype=np.float32),
                 path_or_hf_repo=self._repo,
                 language=self._language,
+                initial_prompt=self._config.initial_prompt(self._language),
                 word_timestamps=False,
                 verbose=None,
             )
@@ -219,6 +221,7 @@ class Transcriber:
             audio,
             path_or_hf_repo=self._repo,
             language=self._language,
+            initial_prompt=self._config.initial_prompt(self._language),
             word_timestamps=True,
             verbose=None,
         )
