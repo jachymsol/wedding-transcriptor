@@ -255,5 +255,5 @@ class TestLoadConfig:
         assert cfg.vad.max_speech_ms == 2_000
         assert cfg.vad.end_overlap_ms == 300
         assert cfg.vad.start_overlap_ms == 600
-        assert cfg.vad.effective("cs") == (6000, 800, 1500)
+        assert cfg.vad.effective("cs") == (4000, 500, 1500)
         assert cfg.vad.effective("en") == (2_000, 300, 600)

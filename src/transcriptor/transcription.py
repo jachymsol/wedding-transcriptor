@@ -12,6 +12,7 @@ latency cost.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -135,6 +136,28 @@ def _find_loop_start(tokens: list[str]) -> int | None:
     return best_start
 
 
+_CJK_PATTERN = re.compile(
+    r"[\u3000-\u303F"                              # CJK punctuation (、。「」etc.)
+    r"\u3040-\u30FF\u31F0-\u31FF\uFF66-\uFF9F"      # Hiragana, Katakana, halfwidth Katakana
+    r"\u4E00-\u9FFF\u3400-\u4DBF"                    # CJK Unified Ideographs (+ Ext A)
+    r"\uAC00-\uD7A3\u1100-\u11FF\u3130-\u318F]"      # Hangul syllables / jamo
+)
+
+
+def _strip_cjk(text: str) -> str:
+    """Remove Japanese/Korean/CJK characters (letters and punctuation) from *text*.
+
+    All supported languages (en/fr/cs/pl) are Latin-script, so any
+    Hiragana/Katakana/Kanji/Hangul characters appearing in Whisper's output
+    are hallucinated garbage — a known small/medium-model failure mode —
+    rather than genuine transcription. Whitespace left behind by removed
+    characters is collapsed.
+    """
+    if not _CJK_PATTERN.search(text):
+        return text
+    return re.sub(r"\s+", " ", _CJK_PATTERN.sub("", text)).strip()
+
+
 class Transcriber:
     """Transcribes speech audio using a local mlx-whisper model.
 
@@ -229,11 +252,15 @@ class Transcriber:
         all_words: list[Word] = []
         texts: list[str] = []
         for seg in raw.get("segments", []):
-            seg_text = seg.get("text", "").strip()
+            seg_text = _strip_cjk(seg.get("text", "").strip())
             if seg_text:
                 texts.append(seg_text)
             for w in seg.get("words", []):
-                all_words.append(Word(word=w["word"], start=w["start"], end=w["end"]))
+                cleaned_word = _strip_cjk(w["word"])
+                if not cleaned_word.strip():
+                    log.warning("Dropping hallucinated CJK word: %r", w["word"])
+                    continue
+                all_words.append(Word(word=cleaned_word, start=w["start"], end=w["end"]))
 
         text = " ".join(texts)
 

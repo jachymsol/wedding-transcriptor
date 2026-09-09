@@ -423,6 +423,81 @@ class TestHallucinationTruncation:
 
 
 # ---------------------------------------------------------------------------
+# transcribe() — CJK (Japanese/Korean) hallucination filtering
+# ---------------------------------------------------------------------------
+
+class TestCJKFiltering:
+    def _make_model_with_words(self, text: str, words: list) -> MagicMock:
+        seg = _make_segment(text, words=words)
+        model = MagicMock()
+        model.return_value = {"text": text, "language": "en", "segments": [seg]}
+        return model
+
+    def test_pure_japanese_segment_dropped_entirely(self):
+        mock_words = [_make_word(" こんにちは", 0.0, 0.5)]
+        model = self._make_model_with_words("こんにちは", mock_words)
+        config = TranscriptionConfig(model="medium", language="en")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == ""
+        assert result.words == []
+
+    def test_pure_korean_segment_dropped_entirely(self):
+        mock_words = [_make_word(" 안녕하세요", 0.0, 0.5)]
+        model = self._make_model_with_words("안녕하세요", mock_words)
+        config = TranscriptionConfig(model="medium", language="en")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == ""
+        assert result.words == []
+
+    def test_mixed_latin_and_japanese_stripped_to_latin(self):
+        mock_words = [
+            _make_word(" Hello", 0.0, 0.3),
+            _make_word(" 世界", 0.3, 0.6),
+            _make_word(" world", 0.6, 0.9),
+        ]
+        model = self._make_model_with_words("Hello 世界 world", mock_words)
+        config = TranscriptionConfig(model="medium", language="en")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == "Hello world"
+        assert [w.word.strip() for w in result.words] == ["Hello", "world"]
+
+    def test_cjk_punctuation_stripped(self):
+        mock_words = [_make_word(" 「hello」", 0.0, 0.5)]
+        model = self._make_model_with_words("「hello」", mock_words)
+        config = TranscriptionConfig(model="medium", language="en")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == "hello"
+
+    def test_hangul_word_dropped_from_word_list(self):
+        mock_words = [
+            _make_word(" thank", 0.0, 0.3),
+            _make_word(" 감사", 0.3, 0.6),
+            _make_word(" you", 0.6, 0.9),
+        ]
+        model = self._make_model_with_words("thank 감사 you", mock_words)
+        config = TranscriptionConfig(model="medium", language="en")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == "thank you"
+        assert len(result.words) == 2
+
+    def test_latin_diacritics_unaffected(self):
+        """French/Czech/Polish accented characters must not be treated as CJK."""
+        text = "Přípitek à la française żołądek"
+        mock_words = [_make_word(f" {w}", i * 0.1, i * 0.1 + 0.09) for i, w in enumerate(text.split())]
+        model = self._make_model_with_words(text, mock_words)
+        config = TranscriptionConfig(model="medium", language="cs")
+        t = Transcriber(config, model=model)
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == text
+        assert len(result.words) == len(text.split())
+
+
+# ---------------------------------------------------------------------------
 # _find_loop_start — periodicity-based hallucination loop detection
 # ---------------------------------------------------------------------------
 
