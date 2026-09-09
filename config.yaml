@@ -14,6 +14,8 @@ transcription:
   initial_prompts:
     cs: "Toto je přepis svatebního proslovu. Ženich Jáchym a nevěsta Sophie, rodina, přátelé, svědci, svatba na zámku Chateau de Vaugrenier, gratulace, přípitek, láska, štěstí, novomanželé."
     en: "This is a transcript of a wedding speech. Groom Jáchym and bride Sophie, family, friends, witnesses, wedding at Chateau de Vaugrenier, congratulations, toast, love, happiness, newlyweds."
+    fr: "Ceci est la transcription d'un discours de mariage. Le marié Jáchym et la mariée Sophie, la famille, les amis, les témoins, le mariage au Château de Vaugrenier, les félicitations, le toast, l'amour, le bonheur, les jeunes mariés."
+    pl: "To jest transkrypcja przemówienia weselnego. Pan młody Jáchym i panna młoda Sophie, rodzina, przyjaciele, świadkowie, ślub na zamku Chateau de Vaugrenier, gratulacje, toast, miłość, szczęście, nowożeńcy."
 
 stabilization:
   silence_ms: 300
@@ -25,6 +27,6 @@ vad:
   start_overlap_ms: 600
   overrides:
     cs:
-      max_speech_ms: 6000
-      end_overlap_ms: 800
+      max_speech_ms: 4000
+      end_overlap_ms: 500
       start_overlap_ms: 1500
