@@ -33,6 +33,9 @@ class AudioConfig(BaseModel):
 class TranscriptionConfig(BaseModel):
     model: str = "medium"
     language: str = "en"
+    #: Which local Whisper backend to use: "auto" (mlx-whisper on macOS,
+    #: faster-whisper elsewhere), or an explicit "mlx" / "faster-whisper".
+    backend: str = "auto"
     #: Per-language Whisper "initial_prompt" priming text, keyed by
     #: ISO-639-1 code. Whisper is less confident on lower-resource
     #: languages (e.g. Czech); a short in-language priming snippet biases

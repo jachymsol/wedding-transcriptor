@@ -37,6 +37,8 @@ from transcriptor.transcription import (
     Word,
     _SAMPLE_RATE,
     _find_loop_start,
+    _resolve_backend_kind,
+    _resolve_fw_model,
     _resolve_mlx_repo,
 )
 
@@ -139,6 +141,65 @@ class TestResolveMLXRepo:
 
 
 # ---------------------------------------------------------------------------
+# _resolve_fw_model
+# ---------------------------------------------------------------------------
+
+class TestResolveFwModel:
+    def test_known_short_name_medium(self):
+        assert _resolve_fw_model("medium") == "medium"
+
+    def test_short_name_large_maps_to_large_v3(self):
+        assert _resolve_fw_model("large") == "large-v3"
+
+    def test_unrecognised_short_name_passes_through(self):
+        assert _resolve_fw_model("distil-medium.en") == "distil-medium.en"
+
+    def test_local_path_passes_through_unchanged(self):
+        assert _resolve_fw_model("/models/my-ct2-model") == "/models/my-ct2-model"
+
+    def test_hf_repo_passes_through_unchanged(self):
+        assert _resolve_fw_model("Systran/faster-whisper-medium") == "Systran/faster-whisper-medium"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_backend_kind
+# ---------------------------------------------------------------------------
+
+class TestResolveBackendKind:
+    def test_explicit_mlx(self):
+        config = TranscriptionConfig(backend="mlx")
+        assert _resolve_backend_kind(config) == "mlx"
+
+    def test_explicit_faster_whisper(self):
+        config = TranscriptionConfig(backend="faster-whisper")
+        assert _resolve_backend_kind(config) == "faster-whisper"
+
+    def test_auto_picks_mlx_on_darwin(self, monkeypatch):
+        import transcriptor.transcription as mod
+        monkeypatch.setattr(mod.platform, "system", lambda: "Darwin")
+        config = TranscriptionConfig(backend="auto")
+        assert _resolve_backend_kind(config) == "mlx"
+
+    def test_auto_picks_faster_whisper_on_windows(self, monkeypatch):
+        import transcriptor.transcription as mod
+        monkeypatch.setattr(mod.platform, "system", lambda: "Windows")
+        config = TranscriptionConfig(backend="auto")
+        assert _resolve_backend_kind(config) == "faster-whisper"
+
+    def test_auto_picks_faster_whisper_on_linux(self, monkeypatch):
+        import transcriptor.transcription as mod
+        monkeypatch.setattr(mod.platform, "system", lambda: "Linux")
+        config = TranscriptionConfig(backend="auto")
+        assert _resolve_backend_kind(config) == "faster-whisper"
+
+    def test_unknown_value_falls_back_to_auto(self, monkeypatch):
+        import transcriptor.transcription as mod
+        monkeypatch.setattr(mod.platform, "system", lambda: "Windows")
+        config = TranscriptionConfig(backend="bogus")
+        assert _resolve_backend_kind(config) == "faster-whisper"
+
+
+# ---------------------------------------------------------------------------
 # Transcriber construction
 # ---------------------------------------------------------------------------
 
@@ -159,6 +220,109 @@ class TestTranscriberInit:
         config = TranscriptionConfig()
         Transcriber(config, model=model)
         model.assert_not_called()
+
+    def test_injected_model_bypasses_backend_selection(self, monkeypatch):
+        """Injecting `model=` always uses the mlx contract, regardless of
+        `config.backend` or the host platform."""
+        import transcriptor.transcription as mod
+        monkeypatch.setattr(mod.platform, "system", lambda: "Windows")
+        model = _make_whisper_model()
+        config = TranscriptionConfig(backend="faster-whisper")
+        t = Transcriber(config, model=model)
+        assert t._backend_kind == "mlx"
+        assert t._model is model
+
+
+# ---------------------------------------------------------------------------
+# faster-whisper backend — output normalization
+# ---------------------------------------------------------------------------
+
+class _FakeFwWord:
+    def __init__(self, word: str, start: float, end: float):
+        self.word = word
+        self.start = start
+        self.end = end
+
+
+class _FakeFwSegment:
+    def __init__(self, text: str, words: list | None = None):
+        self.text = text
+        self.words = words or []
+
+
+class TestFasterWhisperBackend:
+    def _make_transcriber(self, segments: list[_FakeFwSegment]) -> tuple[Transcriber, MagicMock]:
+        config = TranscriptionConfig(model="medium", language="en", backend="faster-whisper")
+        t = Transcriber.__new__(Transcriber)
+        t._config = config
+        t._repo = _resolve_mlx_repo(config.model)
+        t._fw_model_name = _resolve_fw_model(config.model)
+        t._language = config.language
+        t._backend_kind = "faster-whisper"
+        t._model = None
+        fw_model = MagicMock()
+        fw_model.transcribe.return_value = (segments, MagicMock())
+        t._fw_model = fw_model
+        return t, fw_model
+
+    def test_single_segment_text(self):
+        t, _ = self._make_transcriber([_FakeFwSegment("Hello world")])
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == "Hello world"
+
+    def test_words_normalized_from_fw_word_objects(self):
+        words = [_FakeFwWord(" hello", 0.0, 0.4), _FakeFwWord(" world", 0.5, 0.9)]
+        t, _ = self._make_transcriber([_FakeFwSegment("hello world", words)])
+        result = t.transcribe(AUDIO_1S)
+        assert len(result.words) == 2
+        assert result.words[0].word == " hello"
+        assert result.words[0].start == pytest.approx(0.0)
+        assert result.words[0].end == pytest.approx(0.4)
+
+    def test_multiple_segments_joined(self):
+        segments = [_FakeFwSegment("Hello"), _FakeFwSegment("world")]
+        t, _ = self._make_transcriber(segments)
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == "Hello world"
+
+    def test_segment_with_no_words_attribute_handled(self):
+        seg = _FakeFwSegment("hi", words=None)
+        t, _ = self._make_transcriber([seg])
+        result = t.transcribe(AUDIO_1S)
+        assert result.words == []
+
+    def test_language_and_prompt_passed_to_fw_model(self):
+        config = TranscriptionConfig(
+            model="medium", language="cs", backend="faster-whisper",
+            initial_prompts={"cs": "Svatební proslov."},
+        )
+        t = Transcriber.__new__(Transcriber)
+        t._config = config
+        t._repo = _resolve_mlx_repo(config.model)
+        t._fw_model_name = _resolve_fw_model(config.model)
+        t._language = config.language
+        t._backend_kind = "faster-whisper"
+        t._model = None
+        fw_model = MagicMock()
+        fw_model.transcribe.return_value = ([], MagicMock())
+        t._fw_model = fw_model
+
+        t.transcribe(AUDIO_1S)
+        _, kwargs = fw_model.transcribe.call_args
+        assert kwargs["language"] == "cs"
+        assert kwargs["initial_prompt"] == "Svatební proslov."
+        assert kwargs["word_timestamps"] is True
+
+    def test_cjk_and_hallucination_filtering_applied_to_fw_output(self):
+        words = [
+            _FakeFwWord(" thank", 0.0, 0.3),
+            _FakeFwWord(" 感謝", 0.3, 0.6),
+            _FakeFwWord(" you", 0.6, 0.9),
+        ]
+        t, _ = self._make_transcriber([_FakeFwSegment("thank 感謝 you", words)])
+        result = t.transcribe(AUDIO_1S)
+        assert result.text == "thank you"
+        assert len(result.words) == 2
 
 
 # ---------------------------------------------------------------------------

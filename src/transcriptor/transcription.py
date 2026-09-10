@@ -1,8 +1,10 @@
 """Whisper transcription module — FR-004.
 
-Uses mlx-whisper for Apple MLX GPU-accelerated inference on Apple Silicon.
-Model weights are downloaded from Hugging Face on first use and cached in
-~/.cache/huggingface/hub/.  Subsequent starts use the local cache.
+Uses mlx-whisper for Apple MLX GPU-accelerated inference on Apple Silicon
+(macOS), and faster-whisper (CPU) on other platforms. The backend is chosen
+automatically based on the host OS, or can be forced via
+``TranscriptionConfig.backend``. Model weights are downloaded from Hugging
+Face on first use and cached locally; subsequent starts use the cache.
 
 The model is pre-warmed during construction by running a short dummy clip
 through it, so the first real speech segment does not pay the weight-loading
@@ -12,6 +14,7 @@ latency cost.
 from __future__ import annotations
 
 import logging
+import platform
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -35,6 +38,20 @@ _MLX_REPO_MAP: dict[str, str] = {
     "large-v3": "mlx-community/whisper-large-v3",
 }
 
+# Short-name → faster-whisper (CTranslate2) model name mapping. faster-whisper
+# accepts these size names directly (auto-downloaded from HF on first use),
+# so most short names pass through unchanged; this map only exists for
+# consistency and any future renames.
+_FASTER_WHISPER_MODEL_MAP: dict[str, str] = {
+    "tiny": "tiny",
+    "base": "base",
+    "small": "small",
+    "medium": "medium",
+    "large": "large-v3",
+    "large-v2": "large-v2",
+    "large-v3": "large-v3",
+}
+
 
 def _resolve_mlx_repo(model: str) -> str:
     """Map a short model name to a full HF repo string.
@@ -47,6 +64,33 @@ def _resolve_mlx_repo(model: str) -> str:
     if "/" in model:
         return model
     return _MLX_REPO_MAP.get(model, f"mlx-community/whisper-{model}")
+
+
+def _resolve_fw_model(model: str) -> str:
+    """Map a model name to a faster-whisper (CTranslate2) model name/path.
+
+    Names already containing ``"/"`` (a local path or a full HF repo id for a
+    CTranslate2-converted model) are returned unchanged. Short names are
+    looked up in *_FASTER_WHISPER_MODEL_MAP*; unrecognised short names are
+    passed through as-is (faster-whisper accepts arbitrary size strings).
+    """
+    if "/" in model:
+        return model
+    return _FASTER_WHISPER_MODEL_MAP.get(model, model)
+
+
+def _resolve_backend_kind(config: TranscriptionConfig) -> str:
+    """Return ``"mlx"`` or ``"faster-whisper"`` for *config.backend*.
+
+    ``"auto"`` (the default) picks mlx-whisper on macOS and faster-whisper
+    on every other platform.
+    """
+    backend = config.backend
+    if backend in ("mlx", "faster-whisper"):
+        return backend
+    if backend != "auto":
+        log.warning("Unknown transcription.backend %r — falling back to auto", backend)
+    return "mlx" if platform.system() == "Darwin" else "faster-whisper"
 
 
 @dataclass
@@ -159,7 +203,10 @@ def _strip_cjk(text: str) -> str:
 
 
 class Transcriber:
-    """Transcribes speech audio using a local mlx-whisper model.
+    """Transcribes speech audio using a local Whisper model.
+
+    Uses mlx-whisper on macOS (Apple Silicon GPU) and faster-whisper (CPU)
+    on other platforms; see :func:`_resolve_backend_kind`.
 
     The active language can be changed at any time via :meth:`set_language`
     so the operator can switch between speakers mid-event (FR-002).
@@ -178,20 +225,32 @@ class Transcriber:
         config:
             Transcription settings from ``config.yaml``.
         model:
-            Optional callable with the signature
-            ``f(audio, *, path_or_hf_repo, language, word_timestamps,
-            beam_size, verbose, ...) -> dict``.
-            When *None*, ``mlx_whisper.transcribe`` is imported, the model
-            weights are pre-warmed with a short dummy clip (so the first real
-            segment is not delayed by weight loading), and the function is
-            stored as the callable.  Pass a mock callable in tests to avoid
-            downloading real weights.
+            Optional callable mimicking ``mlx_whisper.transcribe``'s
+            signature: ``f(audio, *, path_or_hf_repo, language,
+            word_timestamps, beam_size, verbose, ...) -> dict``. When
+            provided, the mlx-whisper backend/contract is used regardless of
+            platform or ``config.backend`` (this is the injection seam used
+            by tests to avoid downloading real weights). When *None*, the
+            real backend (mlx-whisper or faster-whisper) is selected per
+            :func:`_resolve_backend_kind`, imported, and pre-warmed with a
+            short dummy clip so the first real segment isn't delayed by
+            weight loading.
         """
         self._config: TranscriptionConfig = config
         self._repo: str = _resolve_mlx_repo(config.model)
+        self._fw_model_name: str = _resolve_fw_model(config.model)
         self._language: str = config.language
+        self._fw_model: Any = None
 
-        if model is None:
+        if model is not None:
+            # Injected callable — always treated as the mlx-style contract.
+            self._backend_kind = "mlx"
+            self._model = model
+            return
+
+        self._backend_kind = _resolve_backend_kind(config)
+
+        if self._backend_kind == "mlx":
             import mlx_whisper as _mlx  # lazy import — skipped when model injected
             log.info("Pre-warming mlx-whisper model '%s' …", self._repo)
             _mlx.transcribe(
@@ -203,9 +262,15 @@ class Transcriber:
                 verbose=None,
             )
             log.info("mlx-whisper model ready.")
-            model = _mlx.transcribe
+            self._model = _mlx.transcribe
+        else:
+            from faster_whisper import WhisperModel  # lazy import
 
-        self._model = model
+            log.info("Loading faster-whisper model '%s' (CPU)…", self._fw_model_name)
+            self._fw_model = WhisperModel(
+                self._fw_model_name, device="cpu", compute_type="int8"
+            )
+            log.info("faster-whisper model ready.")
 
     # ------------------------------------------------------------------
     # Public API
@@ -237,25 +302,18 @@ class Transcriber:
         """
         duration_s = len(audio) / _SAMPLE_RATE
 
-        # beam_size omitted → defaults to None → greedy decoding.
-        # Any non-None beam_size raises NotImplementedError in mlx-whisper 0.4.x.
-        # verbose=None suppresses tqdm progress bar (verbose=False still shows it).
-        raw: dict = self._model(
-            audio,
-            path_or_hf_repo=self._repo,
-            language=self._language,
-            initial_prompt=self._config.initial_prompt(self._language),
-            word_timestamps=True,
-            verbose=None,
-        )
+        if self._backend_kind == "mlx":
+            segments = self._run_mlx(audio)
+        else:
+            segments = self._run_faster_whisper(audio)
 
         all_words: list[Word] = []
         texts: list[str] = []
-        for seg in raw.get("segments", []):
-            seg_text = _strip_cjk(seg.get("text", "").strip())
-            if seg_text:
-                texts.append(seg_text)
-            for w in seg.get("words", []):
+        for seg_text, seg_words in segments:
+            cleaned_text = _strip_cjk(seg_text.strip())
+            if cleaned_text:
+                texts.append(cleaned_text)
+            for w in seg_words:
                 cleaned_word = _strip_cjk(w["word"])
                 if not cleaned_word.strip():
                     log.warning("Dropping hallucinated CJK word: %r", w["word"])
@@ -285,6 +343,52 @@ class Transcriber:
             "Transcribed %.1f s [%s]: %r (%d words)",
             duration_s, self._language, text, len(all_words),
         )
+        return result
+
+    # ------------------------------------------------------------------
+    # Backend-specific inference calls
+    # ------------------------------------------------------------------
+
+    def _run_mlx(self, audio: np.ndarray) -> list[tuple[str, list[dict]]]:
+        """Run mlx-whisper (or the injected mock) and normalize its output.
+
+        Returns a list of ``(segment_text, [{"word", "start", "end"}, ...])``.
+        """
+        # beam_size omitted → defaults to None → greedy decoding.
+        # Any non-None beam_size raises NotImplementedError in mlx-whisper 0.4.x.
+        # verbose=None suppresses tqdm progress bar (verbose=False still shows it).
+        raw: dict = self._model(
+            audio,
+            path_or_hf_repo=self._repo,
+            language=self._language,
+            initial_prompt=self._config.initial_prompt(self._language),
+            word_timestamps=True,
+            verbose=None,
+        )
+        return [
+            (seg.get("text", ""), seg.get("words", []))
+            for seg in raw.get("segments", [])
+        ]
+
+    def _run_faster_whisper(self, audio: np.ndarray) -> list[tuple[str, list[dict]]]:
+        """Run faster-whisper and normalize its output to the same shape as mlx.
+
+        Returns a list of ``(segment_text, [{"word", "start", "end"}, ...])``.
+        """
+        segments, _info = self._fw_model.transcribe(
+            audio,
+            language=self._language,
+            initial_prompt=self._config.initial_prompt(self._language),
+            word_timestamps=True,
+            beam_size=1,
+        )
+        result: list[tuple[str, list[dict]]] = []
+        for seg in segments:
+            words = [
+                {"word": w.word, "start": w.start, "end": w.end}
+                for w in (seg.words or [])
+            ]
+            result.append((seg.text, words))
         return result
 
 

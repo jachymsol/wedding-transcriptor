@@ -38,6 +38,9 @@ class TestDefaults:
     def test_transcription_initial_prompts_default_empty(self):
         assert TranscriptionConfig().initial_prompts == {}
 
+    def test_transcription_backend_default_auto(self):
+        assert TranscriptionConfig().backend == "auto"
+
     def test_stabilization_silence_ms(self):
         assert StabilizationConfig().silence_ms == 700
 

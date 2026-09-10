@@ -21,19 +21,25 @@ events with a multilingual audience.
 
 ## Requirements
 
-**Hardware**
+**Hardware / Software**
 
-- A Mac with Apple Silicon (M-series) — transcription runs on-device via
-  `mlx-whisper`, which uses the GPU through Apple's MLX framework
-- A laptop with at least 8 GB RAM
-- A USB audio interface or USB microphone (or the built-in microphone)
+Two supported paths, chosen automatically by OS (`transcription.backend:
+auto`, see [Configuration](#configuration)):
 
-**Software**
+| Platform | Transcription backend | Notes |
+|---|---|---|
+| macOS, Apple Silicon (M-series) | `mlx-whisper` — GPU-accelerated via Apple's MLX framework | Recommended for real-time performance |
+| Windows / Linux / Intel Mac | `faster-whisper` — CPU (int8) | No GPU required; slower than the mlx path, may fall behind on fast speech with larger models |
+
+Both paths additionally require:
 
 - Python 3.12 or later
-- `pip install -e ".[dev]"` (below) installs `mlx-whisper`, `torch` (used only
-  for the Silero VAD model), `sounddevice`, `websockets`, `httpx`,
-  `pydantic-settings`, and the other runtime dependencies
+- A laptop with at least 8 GB RAM
+- A USB audio interface or USB microphone (or the built-in microphone)
+- `pip install -e ".[dev]"` (below) installs the right backend for your OS
+  automatically, plus `torch` (used only for the Silero VAD model),
+  `sounddevice`, `websockets`, `httpx`, `pydantic-settings`, and the other
+  runtime dependencies
 
 ---
 
@@ -144,9 +150,11 @@ audio:
                                    # a numeric device index from sounddevice
 
 transcription:
-  model: medium                   # short name (mapped to an mlx-community/whisper-*
-                                   # repo) or a full Hugging Face repo id
+  model: medium                   # short name (mapped per-backend, see below)
+                                   # or a full backend-specific repo/path id
   language: en                    # initial source language (en/fr/cs/pl)
+  backend: auto                   # "auto" (mlx-whisper on macOS, faster-whisper
+                                   # elsewhere), or explicit "mlx" / "faster-whisper"
   initial_prompts:                # optional per-language Whisper priming text;
     cs: ""                        # helps lower-resource languages avoid hallucinations
 
@@ -187,8 +195,8 @@ Microphone / mixer
       |
   VoiceActivityDetector  Silero VAD; accumulates speech, discards silence
       |
-  Transcriber            mlx-whisper (Apple Silicon GPU); hallucination-loop
-                          and non-Western-character filtering
+  Transcriber            mlx-whisper (macOS) or faster-whisper (other OS);
+                          hallucination-loop and non-Western-character filtering
       |
   Stabilizer             emits a segment after 700 ms silence or 2 s stable text
       |
@@ -271,7 +279,7 @@ all external dependencies are injected via fakes.
 | `config.py` | Pydantic-settings models; loads `config.yaml` |
 | `audio.py` | sounddevice capture loop; device enumeration |
 | `vad.py` | Silero VAD state machine; speech buffering; partial-commit splits |
-| `transcription.py` | mlx-whisper wrapper; hallucination-loop and non-Western-character filtering |
+| `transcription.py` | mlx-whisper / faster-whisper backend selection and wrapper; hallucination-loop and non-Western-character filtering |
 | `stabilization.py` | Revision tracking; segment emission rules |
 | `storage.py` | SQLite offline queue (segments and control messages) |
 | `server.py` | WebSocket client; HTTPS POST fallback; reconnect loop; auth; control messages |
