@@ -1,59 +1,21 @@
 # Wedding Transcriptor
 
-Local speech-to-text client for live events. Captures audio from a mixer or USB
-microphone, transcribes speech on-device with Whisper, and streams finalized
-transcript segments to a central translation server over WebSocket — continuing
-to queue segments locally if the network is unavailable.
+Local speech-to-text client for live events: transcribes speech on-device and
+streams it to a central translation server, for wedding ceremonies and other
+events with a multilingual audience.
 
 ---
 
 ## Contents
 
-- [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Installation](#installation)
-- [Configuration](#configuration)
 - [Running](#running)
-- [Operator interface](#operator-interface)
 - [Offline operation](#offline-operation)
+- [Configuration](#configuration)
+- [How it works](#how-it-works)
 - [Development](#development)
 - [Project layout](#project-layout)
-
----
-
-## How it works
-
-```
-Microphone / mixer
-      |
-  AudioCapture          100 ms PCM chunks at 16 kHz
-      |
-  VoiceActivityDetector  Silero VAD; accumulates speech, discards silence
-      |
-  Transcriber            mlx-whisper (Apple Silicon GPU); hallucination-loop
-                          and non-Western-character filtering
-      |
-  Stabilizer             emits a segment after 700 ms silence or 2 s stable text
-      |
-  ServerClient           WebSocket → HTTPS POST fallback → SQLite offline queue
-      |
-  Translation server
-```
-
-Long utterances (> 10 s, configurable) are split mid-speech. Each split keeps
-two kinds of overlap with the next window: an "end overlap" of already-decoded
-audio that is committed as-is and skipped in the next window, plus a "start
-overlap" of extra audio kept purely as decoding context — so word boundaries
-are preserved and no speech is lost. Both can be tuned per language (see
-`vad.overrides` below), since lower-resource languages (e.g. Czech) often
-benefit from longer windows.
-
-If the operator holds an API key (`api_key` in `config.yaml` / the startup
-dialog), it is sent as a bearer token on every request to the translation
-server, and as a `?token=` query parameter on the WebSocket handshake.
-Besides transcript segments, the client can also send **control messages**
-(`start` / `stop` / `pause` / `section_break`) over the same channel, e.g.
-when the operator clicks Pause or Section Break in the UI.
 
 ---
 
@@ -89,6 +51,76 @@ pip install -e ".[dev]"
 
 The first launch downloads the Silero VAD and Whisper model weights
 (~1.5 GB for `medium`). Subsequent launches are instant.
+
+---
+
+## Running
+
+```bash
+source .venv/bin/activate
+transcriptor
+```
+
+Or, without installing the entry point:
+
+```bash
+python -m transcriptor.main
+```
+
+### Startup dialog
+
+A dialog opens before the main window. Fill in:
+
+| Field | Default | Description |
+|---|---|---|
+| Event ID | from `config.yaml` | Identifies this event in every transcript segment |
+| Server Host | from `config.yaml` | Bare host of the translation server (e.g. `translate.example.com` or `localhost:3000`) |
+| API Key | from `config.yaml` | Bearer token sent with every server request; leave blank if not required |
+| Audio Device | Default | Input device for this session |
+| Save as default | unchecked | Writes Event ID, Server Host, Audio Device, and API Key back to `config.yaml` |
+
+Click **Register** to pre-register the event with the server (`POST
+/admin/events/{event_id}`) without starting the session — useful for
+creating the event ahead of time. Click **Start** to open the main window or
+**Cancel** to exit.
+
+### Operator interface
+
+The main window title bar shows `Wedding Transcriptor: <event_id>`. The
+window itself has these areas:
+
+| Area | Description |
+|---|---|
+| Audio status | "Audio: Connected / Disconnected" and a real-time level bar |
+| Language selector | Dropdown to switch source language mid-event (English / French / Czech / Polish) |
+| Audio device selector | Dropdown (with a **Refresh** button) to switch input device mid-event |
+| Transcript | The most recently finalized segment |
+| Server status | "Server Connected" or "Offline Queue: N segments" |
+
+Buttons:
+
+| Button | Description |
+|---|---|
+| Section Break | Sends a `section_break` control message to the server |
+| Pause / Resume | Toggles a `pause`/`start` control message; disables Section Break while paused |
+| Restart Transcriber | Reinitialises the transcription engine without restarting the whole application; enabled once a restart handler is registered |
+| End Event | Returns to the startup dialog to switch to a different event without quitting the app |
+
+Close the window or press Ctrl+C to shut down gracefully.
+
+---
+
+## Offline operation
+
+If the WebSocket connection drops, transcript segments and control messages
+(section breaks, pause/resume, start/stop) are written to
+`data/transcript_queue.db` (SQLite WAL mode). On the next successful connection
+the client drains the queue before handling live traffic. Nothing is lost as
+long as disk space is available.
+
+The client retries the connection every 5 seconds. If WebSocket
+(`/ws/ingest`) remains unavailable it falls back to HTTPS POST to `/ingest`
+on the same host.
 
 ---
 
@@ -146,79 +178,41 @@ available devices.
 
 ---
 
-## Running
+## How it works
 
-```bash
-source .venv/bin/activate
-transcriptor
+```
+Microphone / mixer
+      |
+  AudioCapture          100 ms PCM chunks at 16 kHz
+      |
+  VoiceActivityDetector  Silero VAD; accumulates speech, discards silence
+      |
+  Transcriber            mlx-whisper (Apple Silicon GPU); hallucination-loop
+                          and non-Western-character filtering
+      |
+  Stabilizer             emits a segment after 700 ms silence or 2 s stable text
+      |
+  ServerClient           WebSocket → HTTPS POST fallback → SQLite offline queue
+      |
+  Translation server
 ```
 
-Or, without installing the entry point:
+Long utterances (> 10 s, configurable) are split mid-speech. Each split keeps
+two kinds of overlap with the next window: an "end overlap" of already-decoded
+audio that is committed as-is and skipped in the next window, plus a "start
+overlap" of extra audio kept purely as decoding context — so word boundaries
+are preserved and no speech is lost. Both can be tuned per language (see
+`vad.overrides` above), since lower-resource languages (e.g. Czech) often
+benefit from longer windows.
 
-```bash
-python -m transcriptor.main
-```
+If the operator holds an API key (`api_key` in `config.yaml` / the startup
+dialog), it is sent as a bearer token on every request to the translation
+server, and as a `?token=` query parameter on the WebSocket handshake.
+Besides transcript segments, the client can also send **control messages**
+(`start` / `stop` / `pause` / `section_break`) over the same channel, e.g.
+when the operator clicks Pause or Section Break in the UI.
 
-### Startup dialog
-
-A dialog opens before the main window. Fill in:
-
-| Field | Default | Description |
-|---|---|---|
-| Event ID | from `config.yaml` | Identifies this event in every transcript segment |
-| Server Host | from `config.yaml` | Bare host of the translation server (e.g. `translate.example.com` or `localhost:3000`) |
-| API Key | from `config.yaml` | Bearer token sent with every server request; leave blank if not required |
-| Audio Device | Default | Input device for this session |
-| Save as default | unchecked | Writes Event ID, Server Host, Audio Device, and API Key back to `config.yaml` |
-
-Click **Register** to pre-register the event with the server (`POST
-/admin/events/{event_id}`) without starting the session — useful for
-creating the event ahead of time. Click **Start** to open the main window or
-**Cancel** to exit.
-
----
-
-## Operator interface
-
-The main window title bar shows `Wedding Transcriptor: <event_id>`. The
-window itself has these areas:
-
-| Area | Description |
-|---|---|
-| Audio status | "Audio: Connected / Disconnected" and a real-time level bar |
-| Language selector | Dropdown to switch source language mid-event (English / French / Czech / Polish) |
-| Audio device selector | Dropdown (with a **Refresh** button) to switch input device mid-event |
-| Transcript | The most recently finalized segment |
-| Server status | "Server Connected" or "Offline Queue: N segments" |
-
-Buttons:
-
-| Button | Description |
-|---|---|
-| Section Break | Sends a `section_break` control message to the server |
-| Pause / Resume | Toggles a `pause`/`start` control message; disables Section Break while paused |
-| Restart Transcriber | Reinitialises the transcription engine without restarting the whole application; enabled once a restart handler is registered |
-| End Event | Returns to the startup dialog to switch to a different event without quitting the app |
-
-Close the window or press Ctrl+C to shut down gracefully.
-
----
-
-## Offline operation
-
-If the WebSocket connection drops, transcript segments and control messages
-(section breaks, pause/resume, start/stop) are written to
-`data/transcript_queue.db` (SQLite WAL mode). On the next successful connection
-the client drains the queue before handling live traffic. Nothing is lost as
-long as disk space is available.
-
-The client retries the connection every 5 seconds. If WebSocket
-(`/ws/ingest`) remains unavailable it falls back to HTTPS POST to `/ingest`
-on the same host.
-
----
-
-## Transcript segment format
+### Transcript segment format
 
 Each finalized segment is sent as JSON:
 
@@ -335,3 +329,4 @@ wedding-transcriptor/
 └── logs/
     └── transcriber.log          # created on first run
 ```
+</content>
